@@ -1,0 +1,72 @@
+syntax = "proto3";
+package multiplexer;
+
+// Request for new channel
+message RequestChannelNew {
+  // New channel ID
+  uint64 channel_id = 1;
+
+  /// Raw destination
+  bytes endpoint = 2;
+};
+
+// Request to close channel
+message RequestChannelClose {
+  // Channel ID to close
+  uint64 channel_id = 1;
+};
+
+// Response for channel creation with its ID
+message ResponseChannelNew {
+  // Channel ID is indeed created
+  uint64 channel_id = 1;
+};
+
+// Response for channel closing
+message ResponseChannelClose {
+  // Channel ID was closed
+  uint64 channel_id = 1;
+};
+
+// Error linked to channel
+message Error {
+  // Channel ID linked to this error
+  uint64 channel_id = 1;
+
+  // A string describing the error
+  string error = 2;
+};
+
+// Data message, goes in both ways
+message Data {
+  // Destination channel ID
+  uint64 channel_id = 1;
+
+  // The raw data
+  bytes buffer = 2;
+};
+
+// Generic request
+message Request {
+  oneof request {
+    RequestChannelNew new = 1;
+    RequestChannelClose close = 2;
+  }
+};
+
+// Generic request
+message Response {
+  oneof response {
+    Error error = 1;
+    ResponseChannelNew new = 2;
+    ResponseChannelClose close = 3;
+  }
+};
+
+message Message {
+  oneof msg {
+    Request request = 1;
+    Response response = 2;
+    Data data = 3;
+  }
+}

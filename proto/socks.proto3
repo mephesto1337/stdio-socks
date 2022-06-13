@@ -1,0 +1,40 @@
+syntax = "proto3";
+package socket;
+
+// IP protocol
+enum Protocol {
+  TCP = 0;
+  UDP = 1;
+}
+
+// IP Endpoint to connect to
+message IPEndpoint {
+  oneof host {
+    // IPv4 address
+    uint32 ip4 = 1;
+
+    // IPv6 address (must be 16 bytes long)
+    bytes ip6 = 2;
+
+    // FQDN
+    string hostname = 3;
+  }
+
+  // Port number (must fit into a u16)
+  uint32 port = 4;
+}
+
+// Endpoint to connect to
+message Endpoint {
+  // Protocol to use
+  Protocol proto = 1;
+
+  // Destination
+  oneof destination {
+    // IPv4/6 endpoint
+    IPEndpoint ip = 2;
+
+    // Unix path to socks
+    string unix = 3;
+  };
+}
