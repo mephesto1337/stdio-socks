@@ -73,17 +73,12 @@ async fn handshake(
     let result = match rx.await {
         Ok(v) => v,
         Err(e) => {
-            log::error!("Cannot received result from queue: {}", e);
+            tracing::event!(tracing::Level::ERROR, error = ?e, "Cannot received result from queue: {}", e);
             return Ok(());
         }
     };
     if let Err(why) = result {
-        log::error!(
-            "Cannot open channel to {}:{}: {}",
-            request.addr,
-            request.port,
-            why
-        );
+        tracing::event!(tracing::Level::ERROR, ?request, reason = %why, "Cannot open channel to {}:{}: {}", request.addr, request.port, why);
         let response = socks::Response {
             version: socks::Version::Socks5,
             status: socks::Status::GeneralFailure,
@@ -119,7 +114,10 @@ async fn open_stream(_: Vec<u8>) -> Result<Box<dyn Stream>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    tracing_log::LogTracer::builder()
+        .with_max_level(tracing_log::log::LevelFilter::Debug)
+        .init()
+        .expect("Cannot init log");
     let args = Args::parse();
 
     let listener = TcpListener::bind(&args.bind_addr).await?;
@@ -135,12 +133,17 @@ async fn main() -> Result<()> {
 
     loop {
         let (client, addr) = listener.accept().await?;
-        log::debug!("New connection from {}", addr);
+        tracing::event!(
+            tracing::Level::DEBUG,
+            ?addr,
+            "New connection from  {}",
+            addr
+        );
         let mp = Arc::clone(&mp);
         let channel_id = next_channel_id.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
             if let Err(e) = handshake(mp, client, channel_id).await {
-                log::error!("Error with client: {}", e);
+                tracing::event!(tracing::Level::ERROR, error = ?e, ?addr, "Error which client {}: {}", addr, e);
             }
         });
     }

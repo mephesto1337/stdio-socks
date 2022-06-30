@@ -9,9 +9,9 @@ If the server denies dynamic forward (`AllowTcpForwarding no` or
 
 1. Setup
    ```bash
-   cargo build --release
-   scp target/release/server server:/tmp
-   rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f | target/release/client --bind-addr=0.0.0.0:1337 | ssh server /tmp/server > /tmp/f
+   cargo build --release --examples
+   scp target/release/examples/server server:/tmp
+   rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f | target/release/examples/client --bind-addr=0.0.0.0:1337 | ssh server /tmp/server > /tmp/f
    ```
 
 2. Enjoy

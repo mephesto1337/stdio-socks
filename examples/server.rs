@@ -86,7 +86,11 @@ async fn open_stream(req: Vec<u8>) -> Result<Box<dyn Stream>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    tracing_log::LogTracer::builder()
+        .with_max_level(tracing_log::log::LevelFilter::Debug)
+        .init()
+        .expect("Cannot init log");
+    tracing::event!(tracing::Level::INFO, "Server started");
     let stdio = Stdio::new();
     let (mp, rx) = Multiplexer::create();
 

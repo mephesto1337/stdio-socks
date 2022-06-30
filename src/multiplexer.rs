@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
+use tracing::{event, Level};
+
 use prost::Message;
 
 use crate::{ChannelId, Error, Result};
@@ -103,7 +105,7 @@ where
             }
         }
         Err(e) => {
-            log::debug!("Decode error: {}", e);
+            event!(Level::DEBUG, error = ?e, "Decode error: {}", e);
             Ok(None)
         }
     }
@@ -190,7 +192,7 @@ impl Multiplexer {
                 if let Some(r) = r.request {
                     self.dispatch_request(r, open_stream).await
                 } else {
-                    log::warn!("Empty request received");
+                    event!(Level::WARN, "Empty request received");
                     Ok(())
                 }
             }
@@ -198,7 +200,7 @@ impl Multiplexer {
                 if let Some(r) = r.response {
                     self.dispatch_response(r).await
                 } else {
-                    log::warn!("Empty response received");
+                    event!(Level::WARN, "Empty response received");
                     Ok(())
                 }
             }
@@ -238,7 +240,12 @@ impl Multiplexer {
         if let Some(tx) = maybe_tx {
             let _ = tx.send(result);
         } else {
-            log::warn!("No handler for for response on channel {}", channel_id);
+            event!(
+                Level::WARN,
+                ?channel_id,
+                "No handler for response on channel {}",
+                channel_id
+            );
         }
 
         Ok(())
@@ -263,7 +270,7 @@ impl Multiplexer {
                 let mut channel = self.create_channel_with_id(new.channel_id, stream)?;
                 tokio::spawn(async move {
                     if let Err(e) = channel.pipe().await {
-                        log::error!("Error with channel {}: {}", new.channel_id, e);
+                        event!(Level::ERROR, channel_id = %new.channel_id, error = ?e, "Error wich channel {}: {}", new.channel_id, e);
                     }
                 });
             }
