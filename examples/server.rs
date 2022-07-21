@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
         .init();
     tracing::info!("Server started");
     let stdio = Stdio::new();
-    let (mp, rx) = Multiplexer::create();
+    let (mp, rx) = Multiplexer::create("server");
 
     let my_open_stream = move |data| Box::pin(open_stream(data));
     if let Err(e) = mp.serve(stdio, rx, &my_open_stream).await {

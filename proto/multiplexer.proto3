@@ -42,8 +42,11 @@ message Data {
   // Destination channel ID
   uint64 channel_id = 1;
 
+  // Packet counter
+  uint64 counter = 2;
+
   // The raw data
-  bytes buffer = 2;
+  bytes buffer = 3;
 };
 
 // Generic request

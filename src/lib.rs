@@ -23,11 +23,15 @@ pub(crate) mod proto {
         }
     }
 
-    impl From<(u64, Vec<u8>)> for Message {
-        fn from(r: (u64, Vec<u8>)) -> Self {
-            let (channel_id, buffer) = r;
+    impl From<(u64, u64, Vec<u8>)> for Message {
+        fn from(r: (u64, u64, Vec<u8>)) -> Self {
+            let (channel_id, counter, buffer) = r;
             Self {
-                msg: Some(message::Msg::Data(Data { channel_id, buffer })),
+                msg: Some(message::Msg::Data(Data {
+                    channel_id,
+                    counter,
+                    buffer,
+                })),
             }
         }
     }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -18,7 +19,7 @@ impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Sync + Unpin {}
 /// Server part for the multiplexer
 pub struct Multiplexer {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
-    channels: RwLock<HashMap<ChannelId, mpsc::Sender<Vec<u8>>>>,
+    channels: RwLock<HashMap<ChannelId, (AtomicU64, mpsc::Sender<Vec<u8>>)>>,
 
     /// A Sender to give to each worker
     tx: mpsc::Sender<crate::proto::Message>,
@@ -122,7 +123,7 @@ impl Multiplexer {
         let (tx, rx) = mpsc::channel(64usize);
         {
             let mut channels = self.channels.write()?;
-            channels.insert(id, tx);
+            channels.insert(id, (AtomicU64::new(0), tx));
         }
 
         Ok(Channel {
@@ -161,6 +162,7 @@ impl Multiplexer {
         let mut tx_buffer = Vec::with_capacity(8192);
 
         loop {
+            // TODO: exhaustive match (Err(E) + None)
             tokio::select! {
                 Ok(msg) = recv_message(&self.name, &mut stream, &mut rx_buffer) => {
                     tracing::trace!("[{}] Received message from stream: {:?}", &self.name, &msg);
@@ -170,6 +172,7 @@ impl Multiplexer {
                     }
                 },
                 Some(msg) = rx.recv() => {
+                    tracing::trace!("[{}] Sending message to stream: {:?}", &self.name, &msg);
                     tx_buffer.clear();
                     msg.encode(&mut tx_buffer)?;
                     stream.write_all(&tx_buffer[..]).await?;
@@ -211,8 +214,20 @@ impl Multiplexer {
             crate::proto::message::Msg::Data(data) => {
                 let tx = {
                     let channels = self.channels.read()?;
-                    if let Some(tx) = channels.get(&data.channel_id).map(|tx| tx.clone()) {
+                    if let Some((counter, tx)) = channels
+                        .get(&data.channel_id)
+                        .map(|(c, tx)| (c, tx.clone()))
+                    {
                         tracing::debug!("[{}] Got TX for channel {}", &self.name, &data.channel_id);
+                        let internal_counter = counter.load(Ordering::Acquire);
+                        if internal_counter != data.counter {
+                            tracing::error!(
+                                "We missed some packet. Internal counter: {} != {}",
+                                internal_counter,
+                                &data.counter
+                            );
+                        }
+                        counter.store(data.counter + 1, Ordering::Release);
                         Ok(tx)
                     } else {
                         tracing::warn!(
@@ -375,6 +390,7 @@ impl Multiplexer {
 impl Channel {
     pub async fn pipe(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
+        let mut counter_send = 0u64;
 
         loop {
             tokio::select! {
@@ -385,11 +401,12 @@ impl Channel {
                             break;
                         },
                         Ok(n) => {
-                            let msg = (self.id, buffer[..n].to_vec());
+                            let msg = (self.id, counter_send, buffer[..n].to_vec());
                             if let Err(e) = self.tx.send(msg.into()).await {
                                 tracing::error!("Error while sending into channel: {:?}", &e);
                                 return Err(e.into());
                             }
+                            counter_send += 1;
                         },
                         Err(e) => {
                             tracing::warn!("Got error while reading stream: {}", &e);
@@ -410,5 +427,12 @@ impl Channel {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        let prog = std::env::args().next().unwrap();
+        tracing::debug!("[{}] Dropping channel {}", prog, self.id);
     }
 }

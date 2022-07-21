@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind(&args.bind_addr).await?;
     let stdio = Stdio::new();
-    let (mp, rx) = Multiplexer::create();
+    let (mp, rx) = Multiplexer::create("client");
     let next_channel_id = AtomicU64::new(0);
 
     let mp_server = Arc::clone(&mp);
