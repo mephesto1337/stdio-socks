@@ -6,11 +6,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use tracing::{event, Level};
-
 use prost::Message;
 
-use crate::{ChannelId, Error, Result};
+use crate::{ChannelId, Result};
 
 /// Trait for AsyncRead + AsyncWrite objects
 pub trait Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
@@ -105,7 +103,7 @@ where
             }
         }
         Err(e) => {
-            event!(Level::DEBUG, error = ?e, "Decode error: {}", e);
+            tracing::debug!("Decode error: {}", e);
             Ok(None)
         }
     }
@@ -160,6 +158,7 @@ impl Multiplexer {
         loop {
             tokio::select! {
                 Ok(msg) = recv_message(&mut stream, &mut rx_buffer) => {
+                    tracing::debug!("Received message from stream: {:?}", &msg);
                     if let Some(msg) = msg {
                         let me = Arc::clone(&self);
                         me.dispatch_message(msg, open_stream).await?;
@@ -192,7 +191,7 @@ impl Multiplexer {
                 if let Some(r) = r.request {
                     self.dispatch_request(r, open_stream).await
                 } else {
-                    event!(Level::WARN, "Empty request received");
+                    tracing::warn!("Empty request received");
                     Ok(())
                 }
             }
@@ -200,19 +199,31 @@ impl Multiplexer {
                 if let Some(r) = r.response {
                     self.dispatch_response(r).await
                 } else {
-                    event!(Level::WARN, "Empty response received");
+                    tracing::warn!("Empty response received");
                     Ok(())
                 }
             }
             crate::proto::message::Msg::Data(data) => {
                 let tx = {
                     let channels = self.channels.read()?;
-                    channels
-                        .get(&data.channel_id)
-                        .map(|tx| tx.clone())
-                        .ok_or(Error::ChannelClosed)?
+                    if let Some(tx) = channels.get(&data.channel_id).map(|tx| tx.clone()) {
+                        Ok(tx)
+                    } else {
+                        tracing::warn!(
+                            "Tried to write into a closed channel ({})",
+                            data.channel_id
+                        );
+
+                        Err((
+                            data.channel_id,
+                            format!("Channel {} is closed", data.channel_id),
+                        ))
+                    }
                 };
-                tx.send(data.buffer).await?;
+                match tx {
+                    Ok(tx) => tx.send(data.buffer).await?,
+                    Err(e) => self.send(e).await?,
+                }
                 Ok(())
             }
         }
@@ -238,14 +249,11 @@ impl Multiplexer {
         };
 
         if let Some(tx) = maybe_tx {
-            let _ = tx.send(result);
+            if let Err(e) = tx.send(result) {
+                tracing::error!("Could send back result on channel {}: {:?}", channel_id, e);
+            }
         } else {
-            event!(
-                Level::WARN,
-                ?channel_id,
-                "No handler for response on channel {}",
-                channel_id
-            );
+            tracing::warn!("No handler for response on channel {}", channel_id);
         }
 
         Ok(())
@@ -270,7 +278,7 @@ impl Multiplexer {
                 let mut channel = self.create_channel_with_id(new.channel_id, stream)?;
                 tokio::spawn(async move {
                     if let Err(e) = channel.pipe().await {
-                        event!(Level::ERROR, channel_id = %new.channel_id, error = ?e, "Error wich channel {}: {}", new.channel_id, e);
+                        tracing::error!("Error wich channel {}: {}", new.channel_id, e);
                     }
                 });
             }
@@ -280,11 +288,13 @@ impl Multiplexer {
                     channels.remove(&close.channel_id).map(|_| ())
                 };
                 if maybe_tx.is_some() {
+                    tracing::debug!("Closing channel {}", close.channel_id);
                     self.send(crate::proto::ResponseChannelNew {
                         channel_id: close.channel_id,
                     })
                     .await?;
                 } else {
+                    tracing::debug!("Closing unexisting channel {}", close.channel_id);
                     self.send((close.channel_id, format!("Unknown channel ID")))
                         .await?;
                 }
@@ -344,7 +354,10 @@ impl Channel {
                         Ok(0) => break,
                         Ok(n) => {
                             let msg = (self.id, buffer[..n].to_vec());
-                            self.tx.send(msg.into()).await?;
+                            if let Err(e) = self.tx.send(msg.into()).await {
+                                tracing::error!("Error while sending into channel: {:?}", &e);
+                                return Err(e.into());
+                            }
                         },
                         Err(e) => return Err(e.into())
                     }

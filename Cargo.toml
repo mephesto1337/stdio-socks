@@ -8,7 +8,7 @@ edition = "2021"
 prost-build = "0.10"
 
 [dev-dependencies]
-tracing-log = { version = "0.1", features = ["env_logger"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

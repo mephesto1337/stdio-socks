@@ -73,12 +73,17 @@ async fn handshake(
     let result = match rx.await {
         Ok(v) => v,
         Err(e) => {
-            tracing::event!(tracing::Level::ERROR, error = ?e, "Cannot received result from queue: {}", e);
+            tracing::error!("Cannot receive result from queue: {}", e);
             return Ok(());
         }
     };
     if let Err(why) = result {
-        tracing::event!(tracing::Level::ERROR, ?request, reason = %why, "Cannot open channel to {}:{}: {}", request.addr, request.port, why);
+        tracing::error!(
+            "Cannot open channel {}:{}: {}",
+            request.addr,
+            request.port,
+            why
+        );
         let response = socks::Response {
             version: socks::Version::Socks5,
             status: socks::Status::GeneralFailure,
@@ -114,10 +119,10 @@ async fn open_stream(_: Vec<u8>) -> Result<Box<dyn Stream>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_log::LogTracer::builder()
-        .with_max_level(tracing_log::log::LevelFilter::Debug)
-        .init()
-        .expect("Cannot init log");
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
     let args = Args::parse();
 
     let listener = TcpListener::bind(&args.bind_addr).await?;
@@ -133,17 +138,13 @@ async fn main() -> Result<()> {
 
     loop {
         let (client, addr) = listener.accept().await?;
-        tracing::event!(
-            tracing::Level::DEBUG,
-            ?addr,
-            "New connection from  {}",
-            addr
-        );
+        tracing::debug!("New connection from {}", &addr);
         let mp = Arc::clone(&mp);
         let channel_id = next_channel_id.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
+            tracing::info!("New task for {} with ID {}", addr, channel_id);
             if let Err(e) = handshake(mp, client, channel_id).await {
-                tracing::event!(tracing::Level::ERROR, error = ?e, ?addr, "Error which client {}: {}", addr, e);
+                tracing::error!("Error which client {}: {}", addr, e);
             }
         });
     }

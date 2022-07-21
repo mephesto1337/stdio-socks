@@ -81,6 +81,7 @@ impl From<prost::EncodeError> for Error {
 
 impl<T> From<SendError<T>> for Error {
     fn from(_: SendError<T>) -> Self {
+        tracing::debug!("Transformed SendError into ChannelClosed");
         Self::ChannelClosed
     }
 }

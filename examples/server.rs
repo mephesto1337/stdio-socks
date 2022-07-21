@@ -86,14 +86,18 @@ async fn open_stream(req: Vec<u8>) -> Result<Box<dyn Stream>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_log::LogTracer::builder()
-        .with_max_level(tracing_log::log::LevelFilter::Debug)
-        .init()
-        .expect("Cannot init log");
-    tracing::event!(tracing::Level::INFO, "Server started");
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+    tracing::info!("Server started");
     let stdio = Stdio::new();
     let (mp, rx) = Multiplexer::create();
 
     let my_open_stream = move |data| Box::pin(open_stream(data));
-    mp.serve(stdio, rx, &my_open_stream).await
+    if let Err(e) = mp.serve(stdio, rx, &my_open_stream).await {
+        tracing::error!("Error with main loop on server: {}", e);
+    }
+
+    Ok(())
 }
