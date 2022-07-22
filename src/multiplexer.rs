@@ -85,6 +85,12 @@ where
     let start = buffer.len();
     buffer.reserve(4096);
     let size = stream.read_buf(buffer).await?;
+    tracing::trace!(
+        "[{}] Receive buffer size: {} (+{})",
+        name,
+        buffer.len(),
+        size
+    );
     if size == 0 {
         return Err(
             io::Error::new(io::ErrorKind::BrokenPipe, "Remote end has closed stream").into(),
@@ -100,6 +106,7 @@ where
                     .try_into()
                     .expect("Cannot convert u64 to usize");
                 // forget already read elements and shift the rest to the beginnig
+                tracing::trace!("Resizing buffer, shift of {}", position);
                 buffer_memmove(buffer, position);
 
                 Ok(Some(msg))
@@ -108,7 +115,11 @@ where
             }
         }
         Err(e) => {
-            tracing::debug!("[{}] Decode error: {}", name, e);
+            tracing::debug!(
+                "[{}] Decode error (possible unterminated read): {}",
+                name,
+                e
+            );
             Ok(None)
         }
     }
@@ -167,7 +178,7 @@ impl Multiplexer {
                     match maybe_msg {
                         Ok(msg) => {
                             if let Some(msg) = msg {
-                                tracing::warn!("[{}] Received message from stream: {}", &self.name, &msg);
+                                tracing::trace!("[{}] Received message from stream: {}", &self.name, &msg);
                                 let me = Arc::clone(&self);
                                 me.dispatch_message(msg, open_stream).await?;
                             }
@@ -181,7 +192,7 @@ impl Multiplexer {
                 maybe_msg = rx.recv() => {
                     match maybe_msg {
                         Some(msg) => {
-                            tracing::warn!("[{}] Sending  message to   stream: {}", &self.name, &msg);
+                            tracing::trace!("[{}] Sending  message to   stream: {}", &self.name, &msg);
                             tx_buffer.clear();
                             msg.encode(&mut tx_buffer)?;
                             stream.write_all(&tx_buffer[..]).await?;
@@ -236,9 +247,17 @@ impl Multiplexer {
                         let internal_counter = counter.load(Ordering::Acquire);
                         if internal_counter != data.counter {
                             tracing::error!(
-                                "We missed some packet. Internal counter: {} != {}",
+                                "[{}] We missed some packet. Internal counter: {} != {}",
+                                &self.name,
                                 internal_counter,
                                 &data.counter
+                            );
+                        } else {
+                            tracing::debug!(
+                                "[{}] channel={}, counter={}",
+                                &self.name,
+                                data.channel_id,
+                                data.counter
                             );
                         }
                         counter.store(data.counter + 1, Ordering::Release);
@@ -420,7 +439,6 @@ impl Channel {
                                 tracing::error!("Error while sending into channel: {:?}", &e);
                                 return Err(e.into());
                             }
-                            tracing::debug!("Sending message with ID {}", counter_send);
                             counter_send += 1;
                         },
                         Err(e) => {
