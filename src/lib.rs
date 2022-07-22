@@ -166,6 +166,33 @@ pub(crate) mod proto {
             }
         }
     }
+
+    impl Message {
+        pub fn get_data(&self) -> Option<&Data> {
+            match self.msg {
+                Some(message::Msg::Data(ref d)) => Some(d),
+                _ => None,
+            }
+        }
+
+        pub fn get_request(&self) -> Option<&request::Request> {
+            match self.msg {
+                Some(message::Msg::Request(Request {
+                    request: Some(ref r),
+                })) => Some(r),
+                _ => None,
+            }
+        }
+
+        pub fn get_response(&self) -> Option<&response::Response> {
+            match self.msg {
+                Some(message::Msg::Response(Response {
+                    response: Some(ref r),
+                })) => Some(r),
+                _ => None,
+            }
+        }
+    }
 }
 
 mod error;
