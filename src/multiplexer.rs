@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{duplex, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
 
 use prost::Message;
@@ -19,7 +18,7 @@ impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Sync + Unpin {}
 /// Server part for the multiplexer
 pub struct Multiplexer {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
-    channels: RwLock<HashMap<ChannelId, (AtomicU64, mpsc::Sender<Vec<u8>>)>>,
+    channels: HashMap<ChannelId, DuplexStream>,
 
     /// A Sender to give to each worker
     tx: mpsc::Sender<crate::proto::Message>,
@@ -40,7 +39,7 @@ pub struct Channel {
     tx: mpsc::Sender<crate::proto::Message>,
 
     /// queue to receive message
-    rx: mpsc::Receiver<Vec<u8>>,
+    pipe: DuplexStream,
 
     /// Stream associated
     stream: Box<dyn Stream>,
@@ -127,20 +126,19 @@ where
 
 impl Multiplexer {
     pub fn create_channel_with_id(
-        &self,
+        &mut self,
         id: ChannelId,
         output: Box<dyn Stream>,
     ) -> Result<Channel> {
-        let (tx, rx) = mpsc::channel(64usize);
+        let (p1, p2) = duplex(8192usize);
         {
-            let mut channels = self.channels.write()?;
-            channels.insert(id, (AtomicU64::new(0), tx));
+            self.channels.insert(id, p2);
         }
 
         Ok(Channel {
             id,
             tx: self.tx.clone(),
-            rx,
+            pipe: p1,
             stream: output,
         })
     }
@@ -149,7 +147,7 @@ impl Multiplexer {
         let (tx, rx) = mpsc::channel(64usize);
         (
             Arc::new(Self {
-                channels: RwLock::new(HashMap::new()),
+                channels: HashMap::new(),
                 tx,
                 queue: Mutex::new(HashMap::new()),
                 name: name.as_ref().to_owned(),
@@ -211,7 +209,7 @@ impl Multiplexer {
     }
 
     async fn dispatch_message<O, F>(
-        self: Arc<Self>,
+        &mut self,
         message: crate::proto::message::Msg,
         open_stream: &O,
     ) -> Result<()>
@@ -237,47 +235,22 @@ impl Multiplexer {
                 }
             }
             crate::proto::message::Msg::Data(data) => {
-                let tx = {
-                    let channels = self.channels.read()?;
-                    if let Some((counter, tx)) = channels
-                        .get(&data.channel_id)
-                        .map(|(c, tx)| (c, tx.clone()))
-                    {
-                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &data.channel_id);
-                        let internal_counter = counter.load(Ordering::Acquire);
-                        if internal_counter != data.counter {
-                            tracing::error!(
-                                "[{}] We missed some packet. Internal counter: {} != {}",
-                                &self.name,
-                                internal_counter,
-                                &data.counter
-                            );
-                        } else {
-                            tracing::debug!(
-                                "[{}] channel={}, counter={}",
-                                &self.name,
-                                data.channel_id,
-                                data.counter
-                            );
-                        }
-                        counter.store(data.counter + 1, Ordering::Release);
-                        Ok(tx)
-                    } else {
-                        tracing::warn!(
-                            "[{}] Tried to write into a closed channel ({})",
-                            &self.name,
-                            data.channel_id
-                        );
-
-                        Err((
-                            data.channel_id,
-                            format!("Channel {} is closed", data.channel_id),
-                        ))
+                if let Some(pipe) = self.channels.get_mut(&data.channel_id) {
+                    if let Err(e) = pipe.write_all(&data.buffer[..]).await {
+                        tracing::error!("Cannot write to channel {}: {}", data.channel_id, e);
                     }
-                };
-                match tx {
-                    Ok(tx) => tx.send(data.buffer).await?,
-                    Err(e) => self.send(e).await?,
+                } else {
+                    tracing::warn!(
+                        "[{}] Tried to write into a closed channel ({})",
+                        &self.name,
+                        data.channel_id
+                    );
+
+                    self.send((
+                        data.channel_id,
+                        format!("Channel {} is closed", data.channel_id),
+                    ))
+                    .await?;
                 }
                 Ok(())
             }
@@ -297,31 +270,22 @@ impl Multiplexer {
         self: Arc<Self>,
         response: crate::proto::response::Response,
     ) -> Result<()> {
-        let (channel_id, result) = match response {
-            crate::proto::response::Response::Error(e) => (e.channel_id, Err(e.error)),
-            crate::proto::response::Response::New(n) => (n.channel_id, Ok(())),
-            crate::proto::response::Response::Close(c) => (c.channel_id, Ok(())),
-        };
-        let maybe_tx = {
-            let mut queue = self.queue.lock()?;
-            queue.remove(&channel_id)
-        };
-
-        if let Some(tx) = maybe_tx {
-            if let Err(e) = tx.send(result) {
+        match response {
+            crate::proto::response::Response::Error(e) => {
                 tracing::error!(
-                    "[{}] Could send back result on channel {}: {:?}",
+                    "[{}] Got error on channel {}: {}",
                     &self.name,
-                    channel_id,
-                    e
+                    e.channel_id,
+                    e.error
                 );
+                self.channels.lock()?.remove(&e.channel_id);
             }
-        } else {
-            tracing::warn!(
-                "[{}] No handler for response on channel {}",
-                &self.name,
-                channel_id
-            );
+            crate::proto::response::Response::New(n) => {
+                tracing::info!("[{}] Channel {} created", &self.name, n.channel_id);
+            }
+            crate::proto::response::Response::Close(c) => {
+                tracing::info!("[{}] Channel {} closed", &self.name, c.channel_id);
+            }
         }
 
         Ok(())
@@ -356,11 +320,8 @@ impl Multiplexer {
                 });
             }
             crate::proto::request::Request::Close(close) => {
-                let maybe_tx = {
-                    let mut channels = self.channels.write()?;
-                    channels.remove(&close.channel_id).map(|_| ())
-                };
-                if maybe_tx.is_some() {
+                let mut channels = self.channels.lock()?;
+                if channels.remove(&close.channel_id).map(|_| ()).is_some() {
                     tracing::debug!("[{}] Closing channel {}", &self.name, close.channel_id);
                     self.send(crate::proto::ResponseChannelNew {
                         channel_id: close.channel_id,
@@ -422,24 +383,23 @@ impl Multiplexer {
 
 impl Channel {
     pub async fn pipe(&mut self) -> Result<()> {
-        let mut buffer = [0u8; 8192];
-        let mut counter_send = 0u64;
+        let mut stream_buffer = [0u8; 8192];
+        let mut pipe_buffer = [0u8; 8192];
 
         loop {
             tokio::select! {
-                res = self.stream.read(&mut buffer[..]) => {
+                res = self.stream.read(&mut stream_buffer[..]) => {
                     match res {
                         Ok(0) => {
                             tracing::debug!("Stream has ended");
                             break;
                         },
                         Ok(n) => {
-                            let msg = (self.id, counter_send, buffer[..n].to_vec());
+                            let msg = (self.id, stream_buffer[..n].to_vec());
                             if let Err(e) = self.tx.send(msg.into()).await {
                                 tracing::error!("Error while sending into channel: {:?}", &e);
                                 return Err(e.into());
                             }
-                            counter_send += 1;
                         },
                         Err(e) => {
                             tracing::warn!("Got error while reading stream: {}", &e);
@@ -447,15 +407,21 @@ impl Channel {
                         }
                     }
                 },
-                maybe_data = self.rx.recv() => {
-                    match maybe_data {
-                        Some(data) => self.stream.write_all(&data[..]).await?,
-                        None => {
-                            tracing::warn!("All tx have been dropped");
+                res = self.pipe.read(&mut pipe_buffer[..]) => {
+                    match res {
+                        Ok(0) => {
+                            tracing::debug!("Pipe has ended");
                             break;
+                        },
+                        Ok(n) => {
+                            self.stream.write_all(&pipe_buffer[..n]).await?;
+                        },
+                        Err(e) => {
+                            tracing::warn!("Got error while reading pipe: {}", &e);
+                            return Err(e.into());
                         }
                     }
-                },
+                }
             }
         }
 

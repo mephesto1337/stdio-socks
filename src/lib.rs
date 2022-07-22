@@ -23,15 +23,11 @@ pub(crate) mod proto {
         }
     }
 
-    impl From<(u64, u64, Vec<u8>)> for Message {
-        fn from(r: (u64, u64, Vec<u8>)) -> Self {
-            let (channel_id, counter, buffer) = r;
+    impl From<(u64, Vec<u8>)> for Message {
+        fn from(r: (u64, Vec<u8>)) -> Self {
+            let (channel_id, buffer) = r;
             Self {
-                msg: Some(message::Msg::Data(Data {
-                    channel_id,
-                    counter,
-                    buffer,
-                })),
+                msg: Some(message::Msg::Data(Data { channel_id, buffer })),
             }
         }
     }
@@ -122,9 +118,8 @@ pub(crate) mod proto {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(
                 f,
-                "Data {{ channel_id: {:x}, counter: {}, buffer: {} bytes }}",
+                "Data {{ channel_id: {:x}, buffer: {} bytes }}",
                 self.channel_id,
-                self.counter,
                 self.buffer.len()
             )
         }
