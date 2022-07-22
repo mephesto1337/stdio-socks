@@ -162,23 +162,37 @@ impl Multiplexer {
         let mut tx_buffer = Vec::with_capacity(8192);
 
         loop {
-            // TODO: exhaustive match (Err(E) + None)
             tokio::select! {
-                Ok(msg) = recv_message(&self.name, &mut stream, &mut rx_buffer) => {
-                    tracing::trace!("[{}] Received message from stream: {:?}", &self.name, &msg);
-                    if let Some(msg) = msg {
-                        let me = Arc::clone(&self);
-                        me.dispatch_message(msg, open_stream).await?;
+                maybe_msg = recv_message(&self.name, &mut stream, &mut rx_buffer) => {
+                    match maybe_msg {
+                        Ok(msg) => {
+                            if let Some(msg) = msg {
+                                tracing::warn!("[{}] Received message from stream: {}", &self.name, &msg);
+                                let me = Arc::clone(&self);
+                                me.dispatch_message(msg, open_stream).await?;
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("[{}] Received error from other end: {}", &self.name, &e);
+                            return Err(e.into());
+                        }
                     }
                 },
-                Some(msg) = rx.recv() => {
-                    tracing::trace!("[{}] Sending message to stream: {:?}", &self.name, &msg);
-                    tx_buffer.clear();
-                    msg.encode(&mut tx_buffer)?;
-                    stream.write_all(&tx_buffer[..]).await?;
-                    stream.flush().await?;
+                maybe_msg = rx.recv() => {
+                    match maybe_msg {
+                        Some(msg) => {
+                            tracing::warn!("[{}] Sending  message to   stream: {}", &self.name, &msg);
+                            tx_buffer.clear();
+                            msg.encode(&mut tx_buffer)?;
+                            stream.write_all(&tx_buffer[..]).await?;
+                            stream.flush().await?;
+                        },
+                        None => {
+                            tracing::info!("[{}] No more message to be received", &self.name);
+                            break;
+                        }
+                    }
                 },
-                else => break,
             }
         }
 
@@ -218,7 +232,7 @@ impl Multiplexer {
                         .get(&data.channel_id)
                         .map(|(c, tx)| (c, tx.clone()))
                     {
-                        tracing::debug!("[{}] Got TX for channel {}", &self.name, &data.channel_id);
+                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &data.channel_id);
                         let internal_counter = counter.load(Ordering::Acquire);
                         if internal_counter != data.counter {
                             tracing::error!(
@@ -406,6 +420,7 @@ impl Channel {
                                 tracing::error!("Error while sending into channel: {:?}", &e);
                                 return Err(e.into());
                             }
+                            tracing::debug!("Sending message with ID {}", counter_send);
                             counter_send += 1;
                         },
                         Err(e) => {
