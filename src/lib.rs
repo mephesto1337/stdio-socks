@@ -77,6 +77,95 @@ pub(crate) mod proto {
             write!(f, "Channel {}: {}", self.channel_id, self.error)
         }
     }
+
+    impl fmt::Display for Message {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if let Some(ref msg) = self.msg {
+                fmt::Display::fmt(msg, f)
+            } else {
+                f.write_str("None")
+            }
+        }
+    }
+
+    impl fmt::Display for message::Msg {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Request(ref r) => fmt::Display::fmt(r, f),
+                Self::Response(ref r) => fmt::Display::fmt(r, f),
+                Self::Data(ref d) => fmt::Display::fmt(d, f),
+            }
+        }
+    }
+
+    impl fmt::Display for Request {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if let Some(ref r) = self.request {
+                fmt::Display::fmt(r, f)
+            } else {
+                f.write_str("Empty request")
+            }
+        }
+    }
+
+    impl fmt::Display for Response {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if let Some(ref r) = self.response {
+                fmt::Display::fmt(r, f)
+            } else {
+                f.write_str("Empty response")
+            }
+        }
+    }
+
+    impl fmt::Display for Data {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "Data {{ channel_id: {:x}, counter: {}, buffer: {} bytes }}",
+                self.channel_id,
+                self.counter,
+                self.buffer.len()
+            )
+        }
+    }
+
+    impl fmt::Display for request::Request {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::New(ref n) => {
+                    write!(
+                        f,
+                        "Request::New {{ channel_id: {}, endpoint: ",
+                        n.channel_id
+                    )?;
+                    for b in &n.endpoint[..] {
+                        write!(f, "{:02x}", b)?;
+                    }
+                    f.write_str(" }}")
+                }
+                Self::Close(ref c) => {
+                    write!(f, "Request::Close {{ channel_id: {} }}", c.channel_id)
+                }
+            }
+        }
+    }
+
+    impl fmt::Display for response::Response {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::New(ref n) => write!(f, "Response::New {{ channel_id: {} }}", n.channel_id),
+                Self::Close(ref c) => {
+                    write!(f, "Response::Close {{ channel_id: {} }}", c.channel_id)
+                }
+                Self::Error(ref e) => write!(
+                    f,
+                    "Response::Error {{ channel_id: {}, error: {} }}",
+                    e.channel_id, e.error
+                ),
+            }
+        }
+    }
 }
 
 mod error;
