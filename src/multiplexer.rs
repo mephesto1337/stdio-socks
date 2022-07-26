@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp;
+use std::collections::{hash_map::Entry, HashMap};
 use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +30,9 @@ pub struct Multiplexer {
 
     /// Name of this multiplexer (mostly used to identify logs lines)
     name: String,
+
+    /// Missing messages
+    messages_buffer: Mutex<HashMap<ChannelId, Vec<crate::proto::Data>>>,
 }
 
 /// A channel to interact with a single client
@@ -153,6 +157,7 @@ impl Multiplexer {
                 tx,
                 queue: Mutex::new(HashMap::new()),
                 name: name.as_ref().to_owned(),
+                messages_buffer: Mutex::new(HashMap::new()),
             }),
             rx,
         )
@@ -245,22 +250,34 @@ impl Multiplexer {
                     {
                         tracing::trace!("[{}] Got TX for channel {}", &self.name, &data.channel_id);
                         let internal_counter = counter.load(Ordering::Acquire);
-                        if internal_counter != data.counter {
-                            tracing::error!(
-                                "[{}] We missed some packet. Internal counter: {} != {}",
-                                &self.name,
-                                internal_counter,
-                                &data.counter
-                            );
-                        } else {
-                            tracing::debug!(
-                                "[{}] channel={}, counter={}",
-                                &self.name,
-                                data.channel_id,
-                                data.counter
-                            );
+                        tracing::debug!(
+                            "[{}] channel={}, counter={}",
+                            &self.name,
+                            data.channel_id,
+                            data.counter
+                        );
+                        match internal_counter.cmp(&data.counter) {
+                            cmp::Ordering::Equal => {
+                                counter.store(data.counter + 1, Ordering::Release);
+                            }
+                            cmp::Ordering::Less => {
+                                tracing::debug!(
+                                    "Missing message {} on channel {}, caching it.",
+                                    internal_counter,
+                                    data.channel_id
+                                );
+                                self.cache_message(data)?;
+                                return Ok(());
+                            }
+                            cmp::Ordering::Greater => {
+                                tracing::error!(
+                                    "Got already processed message id {} on channel {}, ignoring",
+                                    data.counter,
+                                    data.channel_id
+                                );
+                                return Ok(());
+                            }
                         }
-                        counter.store(data.counter + 1, Ordering::Release);
                         Ok(tx)
                     } else {
                         tracing::warn!(
@@ -276,7 +293,21 @@ impl Multiplexer {
                     }
                 };
                 match tx {
-                    Ok(tx) => tx.send(data.buffer).await?,
+                    Ok(tx) => {
+                        let mut last = data.counter;
+                        let channel_id = data.channel_id;
+                        tx.send(data.buffer).await?;
+                        if let Some(messages) = self.take_cached_messages(channel_id, last)? {
+                            for message in messages {
+                                last = message.counter;
+                                tx.send(message.buffer).await?;
+                            }
+                            self.channels
+                                .read()?
+                                .get(&channel_id)
+                                .map(|(c, _tx)| c.store(last + 1, Ordering::Release));
+                        }
+                    }
                     Err(e) => self.send(e).await?,
                 }
                 Ok(())
@@ -290,6 +321,85 @@ impl Multiplexer {
             Err(e.into())
         } else {
             Ok(())
+        }
+    }
+
+    fn cache_messages(
+        &self,
+        channel_id: ChannelId,
+        messages: impl Iterator<Item = crate::proto::Data>,
+    ) -> Result<()> {
+        let mut messages_buffer = self.messages_buffer.lock()?;
+        match messages_buffer.entry(channel_id) {
+            Entry::Vacant(v) => {
+                v.insert(messages.collect());
+            }
+            Entry::Occupied(mut o) => {
+                let cache = o.get_mut();
+                for m in messages {
+                    let position = match cache.binary_search_by_key(&m.counter, |d| d.counter) {
+                        Ok(pos) => {
+                            if cache[pos].buffer != m.buffer {
+                                tracing::error!(
+                                "Ignoring duplicated chunk {} on channel {} with different content",
+                                m.counter,
+                                m.channel_id
+                            );
+                            }
+                            return Ok(());
+                        }
+                        Err(pos) => pos,
+                    };
+                    cache.insert(position, m);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cache_message(&self, data: crate::proto::Data) -> Result<()> {
+        self.cache_messages(data.channel_id, std::iter::once(data))
+    }
+
+    fn take_cached_messages(
+        &self,
+        channel_id: ChannelId,
+        up_to: u64,
+    ) -> Result<Option<Vec<crate::proto::Data>>> {
+        let mut messages_buffer = self.messages_buffer.lock()?;
+        match messages_buffer.entry(channel_id) {
+            Entry::Vacant(_) => Ok(None),
+            Entry::Occupied(mut o) => {
+                let position = match o.get().binary_search_by_key(&up_to, |d| d.counter) {
+                    Ok(pos) => pos,
+                    Err(pos) => pos,
+                };
+                let messages_after = o.get_mut().split_off(position);
+                let mut messages_up_to = o.insert(messages_after);
+                let mut previous_index = None;
+                let mut messages_to_cache = None;
+                for (index, m) in messages_up_to.iter().enumerate() {
+                    if previous_index.is_none() {
+                        previous_index = Some(m.counter);
+                        continue;
+                    }
+                    if let Some(previous_index) = previous_index.as_mut() {
+                        if *previous_index + 1 != m.counter {
+                            messages_to_cache = Some(index);
+                            break;
+                        } else {
+                            *previous_index += 1;
+                        }
+                    } else {
+                        unreachable!("previous_index is Some");
+                    }
+                }
+                if let Some(index) = messages_to_cache {
+                    self.cache_messages(channel_id, messages_up_to.split_off(index).drain(..))?;
+                }
+                Ok(Some(messages_up_to))
+            }
         }
     }
 
