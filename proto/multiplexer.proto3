@@ -38,15 +38,27 @@ message Error {
 };
 
 // Data message, goes in both ways
-message Data {
+message Flow {
   // Destination channel ID
   uint64 channel_id = 1;
 
+  oneof flow {
+    Data data = 2;
+    Acknowledge ack = 3;
+  }
+};
+
+message Data {
   // Packet counter
-  uint64 counter = 2;
+  uint64 counter = 1;
 
   // The raw data
-  bytes buffer = 3;
+  bytes buffer = 2;
+};
+
+message Acknowledge {
+  // Packet counter ack up to
+  uint64 counter = 1;
 };
 
 // Generic request
@@ -70,6 +82,6 @@ message Message {
   oneof msg {
     Request request = 1;
     Response response = 2;
-    Data data = 3;
+    Flow flow = 3;
   }
 }

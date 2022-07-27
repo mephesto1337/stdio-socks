@@ -1,8 +1,6 @@
-use std::cmp;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -20,7 +18,7 @@ impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Sync + Unpin {}
 /// Server part for the multiplexer
 pub struct Multiplexer {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
-    channels: RwLock<HashMap<ChannelId, (AtomicU64, mpsc::Sender<Vec<u8>>)>>,
+    channels: RwLock<HashMap<ChannelId, mpsc::Sender<crate::proto::Flow>>>,
 
     /// A Sender to give to each worker
     tx: mpsc::Sender<crate::proto::Message>,
@@ -30,10 +28,9 @@ pub struct Multiplexer {
 
     /// Name of this multiplexer (mostly used to identify logs lines)
     name: String,
-
-    /// Missing messages
-    messages_buffer: Mutex<HashMap<ChannelId, Vec<crate::proto::Data>>>,
 }
+
+const CHANNEL_WINDOW_SIZE: u64 = 5;
 
 /// A channel to interact with a single client
 pub struct Channel {
@@ -44,10 +41,25 @@ pub struct Channel {
     tx: mpsc::Sender<crate::proto::Message>,
 
     /// queue to receive message
-    rx: mpsc::Receiver<Vec<u8>>,
+    rx: mpsc::Receiver<crate::proto::Flow>,
 
     /// Stream associated
     stream: Box<dyn Stream>,
+
+    /// Unack messages
+    unack_messages: VecDeque<crate::proto::Data>,
+
+    /// Future messages
+    future_messages: VecDeque<crate::proto::Data>,
+
+    /// Expected counter from remote
+    expected_counter: u64,
+
+    /// Current counter
+    counter: u64,
+
+    /// Last acknowledged counter
+    last_ack_counter: u64,
 }
 
 fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
@@ -102,6 +114,8 @@ where
     }
     assert_eq!(buffer.len(), start + size);
     let mut cursor = std::io::Cursor::new(&buffer[..]);
+    // FIXME: this methods consumes the whole buffer and returns the last message. It should
+    // return the first message and not consume the rest
     match crate::proto::Message::decode(&mut cursor) {
         Ok(msg) => {
             if let Some(msg) = msg.msg {
@@ -109,7 +123,7 @@ where
                     .position()
                     .try_into()
                     .expect("Cannot convert u64 to usize");
-                // forget already read elements and shift the rest to the beginnig
+                // forget already read elements and shift the rest to the begin
                 tracing::trace!("Resizing buffer, shift of {}", position);
                 buffer_memmove(buffer, position);
 
@@ -138,7 +152,7 @@ impl Multiplexer {
         let (tx, rx) = mpsc::channel(64usize);
         {
             let mut channels = self.channels.write()?;
-            channels.insert(id, (AtomicU64::new(0), tx));
+            channels.insert(id, tx);
         }
 
         Ok(Channel {
@@ -146,6 +160,11 @@ impl Multiplexer {
             tx: self.tx.clone(),
             rx,
             stream: output,
+            unack_messages: VecDeque::new(),
+            future_messages: VecDeque::new(),
+            expected_counter: 0,
+            counter: 0,
+            last_ack_counter: 0,
         })
     }
 
@@ -157,7 +176,6 @@ impl Multiplexer {
                 tx,
                 queue: Mutex::new(HashMap::new()),
                 name: name.as_ref().to_owned(),
-                messages_buffer: Mutex::new(HashMap::new()),
             }),
             rx,
         )
@@ -241,73 +259,27 @@ impl Multiplexer {
                     Ok(())
                 }
             }
-            crate::proto::message::Msg::Data(data) => {
+            crate::proto::message::Msg::Flow(flow) => {
                 let tx = {
                     let channels = self.channels.read()?;
-                    if let Some((counter, tx)) = channels
-                        .get(&data.channel_id)
-                        .map(|(c, tx)| (c, tx.clone()))
-                    {
-                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &data.channel_id);
-                        let internal_counter = counter.load(Ordering::Acquire);
-                        tracing::debug!(
-                            "[{}] channel={}, counter={}",
-                            &self.name,
-                            data.channel_id,
-                            data.counter
-                        );
-                        match internal_counter.cmp(&data.counter) {
-                            cmp::Ordering::Equal => {
-                                counter.store(data.counter + 1, Ordering::Release);
-                            }
-                            cmp::Ordering::Less => {
-                                tracing::debug!(
-                                    "Missing message {} on channel {}, caching it.",
-                                    internal_counter,
-                                    data.channel_id
-                                );
-                                self.cache_message(data)?;
-                                return Ok(());
-                            }
-                            cmp::Ordering::Greater => {
-                                tracing::error!(
-                                    "Got already processed message id {} on channel {}, ignoring",
-                                    data.counter,
-                                    data.channel_id
-                                );
-                                return Ok(());
-                            }
-                        }
+                    if let Some(tx) = channels.get(&flow.channel_id).map(|tx| tx.clone()) {
+                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &flow.channel_id);
                         Ok(tx)
                     } else {
                         tracing::warn!(
                             "[{}] Tried to write into a closed channel ({})",
                             &self.name,
-                            data.channel_id
+                            flow.channel_id
                         );
 
                         Err((
-                            data.channel_id,
-                            format!("Channel {} is closed", data.channel_id),
+                            flow.channel_id,
+                            format!("Channel {} is closed", flow.channel_id),
                         ))
                     }
                 };
                 match tx {
-                    Ok(tx) => {
-                        let mut last = data.counter;
-                        let channel_id = data.channel_id;
-                        tx.send(data.buffer).await?;
-                        if let Some(messages) = self.take_cached_messages(channel_id, last)? {
-                            for message in messages {
-                                last = message.counter;
-                                tx.send(message.buffer).await?;
-                            }
-                            self.channels
-                                .read()?
-                                .get(&channel_id)
-                                .map(|(c, _tx)| c.store(last + 1, Ordering::Release));
-                        }
-                    }
+                    Ok(tx) => tx.send(flow).await?,
                     Err(e) => self.send(e).await?,
                 }
                 Ok(())
@@ -321,85 +293,6 @@ impl Multiplexer {
             Err(e.into())
         } else {
             Ok(())
-        }
-    }
-
-    fn cache_messages(
-        &self,
-        channel_id: ChannelId,
-        messages: impl Iterator<Item = crate::proto::Data>,
-    ) -> Result<()> {
-        let mut messages_buffer = self.messages_buffer.lock()?;
-        match messages_buffer.entry(channel_id) {
-            Entry::Vacant(v) => {
-                v.insert(messages.collect());
-            }
-            Entry::Occupied(mut o) => {
-                let cache = o.get_mut();
-                for m in messages {
-                    let position = match cache.binary_search_by_key(&m.counter, |d| d.counter) {
-                        Ok(pos) => {
-                            if cache[pos].buffer != m.buffer {
-                                tracing::error!(
-                                "Ignoring duplicated chunk {} on channel {} with different content",
-                                m.counter,
-                                m.channel_id
-                            );
-                            }
-                            return Ok(());
-                        }
-                        Err(pos) => pos,
-                    };
-                    cache.insert(position, m);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn cache_message(&self, data: crate::proto::Data) -> Result<()> {
-        self.cache_messages(data.channel_id, std::iter::once(data))
-    }
-
-    fn take_cached_messages(
-        &self,
-        channel_id: ChannelId,
-        up_to: u64,
-    ) -> Result<Option<Vec<crate::proto::Data>>> {
-        let mut messages_buffer = self.messages_buffer.lock()?;
-        match messages_buffer.entry(channel_id) {
-            Entry::Vacant(_) => Ok(None),
-            Entry::Occupied(mut o) => {
-                let position = match o.get().binary_search_by_key(&up_to, |d| d.counter) {
-                    Ok(pos) => pos,
-                    Err(pos) => pos,
-                };
-                let messages_after = o.get_mut().split_off(position);
-                let mut messages_up_to = o.insert(messages_after);
-                let mut previous_index = None;
-                let mut messages_to_cache = None;
-                for (index, m) in messages_up_to.iter().enumerate() {
-                    if previous_index.is_none() {
-                        previous_index = Some(m.counter);
-                        continue;
-                    }
-                    if let Some(previous_index) = previous_index.as_mut() {
-                        if *previous_index + 1 != m.counter {
-                            messages_to_cache = Some(index);
-                            break;
-                        } else {
-                            *previous_index += 1;
-                        }
-                    } else {
-                        unreachable!("previous_index is Some");
-                    }
-                }
-                if let Some(index) = messages_to_cache {
-                    self.cache_messages(channel_id, messages_up_to.split_off(index).drain(..))?;
-                }
-                Ok(Some(messages_up_to))
-            }
         }
     }
 
@@ -449,11 +342,11 @@ impl Multiplexer {
         match request {
             crate::proto::request::Request::New(new) => {
                 let stream = open_stream(new.endpoint).await?;
+                let mut channel = self.create_channel_with_id(new.channel_id, stream)?;
                 self.send(crate::proto::ResponseChannelNew {
                     channel_id: new.channel_id,
                 })
                 .await?;
-                let mut channel = self.create_channel_with_id(new.channel_id, stream)?;
                 tokio::spawn(async move {
                     if let Err(e) = channel.pipe().await {
                         tracing::error!(
@@ -531,25 +424,75 @@ impl Multiplexer {
 }
 
 impl Channel {
+    fn update_ack(&mut self, counter: u64) {
+        let mut i = 0;
+        while i < self.unack_messages.len() {
+            if self.unack_messages[i].counter <= counter {
+                self.unack_messages.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        assert!(self.last_ack_counter <= counter);
+        self.last_ack_counter = counter;
+    }
+
+    async fn resend_unack(&mut self) -> Result<()> {
+        for message in &self.unack_messages {
+            self.tx.send((self.id, message.clone()).into()).await?;
+        }
+
+        Ok(())
+    }
+
+    fn insert_future(&mut self, data: crate::proto::Data) {
+        let pos = match self
+            .future_messages
+            .binary_search_by_key(&data.counter, |d| d.counter)
+        {
+            Ok(pos) => {
+                if self.future_messages[pos].buffer != data.buffer {
+                    tracing::error!(
+                        "Got duplicate chunk with different data at {}. Ignoring.",
+                        data.counter
+                    );
+                }
+                return;
+            }
+            Err(pos) => pos,
+        };
+        self.future_messages.insert(pos, data);
+    }
+
+    async fn send_futures(&mut self) -> Result<()> {
+        while self.future_messages.len() > 0 {
+            if self.expected_counter == self.future_messages[0].counter {
+                let data = self.future_messages.pop_front().unwrap();
+                self.tx.send((self.id, data).into()).await?;
+                self.expected_counter += 1;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn pipe(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
-        let mut counter_send = 0u64;
 
+        self.resend_unack().await?;
         loop {
             tokio::select! {
-                res = self.stream.read(&mut buffer[..]) => {
+                res = self.stream.read(&mut buffer[..]), if self.counter - self.last_ack_counter < CHANNEL_WINDOW_SIZE => {
                     match res {
                         Ok(0) => {
                             tracing::debug!("Stream has ended");
                             break;
                         },
                         Ok(n) => {
-                            let msg = (self.id, counter_send, buffer[..n].to_vec());
-                            if let Err(e) = self.tx.send(msg.into()).await {
-                                tracing::error!("Error while sending into channel: {:?}", &e);
-                                return Err(e.into());
-                            }
-                            counter_send += 1;
+                            let data: crate::proto::Data = (self.counter, buffer[..n].to_vec()).into();
+                            self.unack_messages.push_back(data.clone());
+                            self.counter += 1;
+                            self.tx.send((self.id, data).into()).await?;
                         },
                         Err(e) => {
                             tracing::warn!("Got error while reading stream: {}", &e);
@@ -559,7 +502,28 @@ impl Channel {
                 },
                 maybe_data = self.rx.recv() => {
                     match maybe_data {
-                        Some(data) => self.stream.write_all(&data[..]).await?,
+                        Some(crate::proto::Flow { flow: Some(flow), ..}) => {
+                            match flow {
+                                crate::proto::flow::Flow::Data(data) => {
+                                    if data.counter == self.expected_counter {
+                                        self.stream.write_all(&data.buffer[..]).await?;
+                                        self.expected_counter += 1;
+                                        self.send_futures().await?;
+                                        let ack: crate::proto::Message = (self.id, self.expected_counter - 1).into();
+                                        self.tx.send(ack).await?;
+                                    } else {
+                                        tracing::warn!("Got future packet, do not send ACK (expected: {}, received: {})", self.expected_counter, data.counter);
+                                        self.insert_future(data);
+                                    }
+                                }
+                                crate::proto::flow::Flow::Ack(ack) => {
+                                    self.update_ack(ack.counter);
+                                }
+                            }
+                        },
+                        Some(crate::proto::Flow { channel_id, flow: None }) => {
+                            tracing::warn!("Invalid Flow message received on channel {}", channel_id);
+                        }
                         None => {
                             tracing::warn!("All tx have been dropped");
                             break;

@@ -23,14 +23,44 @@ pub(crate) mod proto {
         }
     }
 
+    impl From<(u64, Data)> for Message {
+        fn from(r: (u64, Data)) -> Self {
+            let (channel_id, data) = r;
+            Self {
+                msg: Some(message::Msg::Flow(Flow {
+                    channel_id,
+                    flow: Some(flow::Flow::Data(data)),
+                })),
+            }
+        }
+    }
+
+    impl From<(u64, u64)> for Message {
+        fn from(r: (u64, u64)) -> Self {
+            let (channel_id, counter) = r;
+            Self {
+                msg: Some(message::Msg::Flow(Flow {
+                    channel_id,
+                    flow: Some(flow::Flow::Ack(Acknowledge { counter })),
+                })),
+            }
+        }
+    }
+
+    impl From<(u64, Vec<u8>)> for Data {
+        fn from(r: (u64, Vec<u8>)) -> Self {
+            let (counter, buffer) = r;
+            Self { counter, buffer }
+        }
+    }
+
     impl From<(u64, u64, Vec<u8>)> for Message {
         fn from(r: (u64, u64, Vec<u8>)) -> Self {
             let (channel_id, counter, buffer) = r;
             Self {
-                msg: Some(message::Msg::Data(Data {
+                msg: Some(message::Msg::Flow(Flow {
                     channel_id,
-                    counter,
-                    buffer,
+                    flow: Some(flow::Flow::Data(Data { counter, buffer })),
                 })),
             }
         }
@@ -93,7 +123,16 @@ pub(crate) mod proto {
             match self {
                 Self::Request(ref r) => fmt::Display::fmt(r, f),
                 Self::Response(ref r) => fmt::Display::fmt(r, f),
+                Self::Flow(ref fl) => fmt::Display::fmt(fl, f),
+            }
+        }
+    }
+
+    impl fmt::Display for flow::Flow {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
                 Self::Data(ref d) => fmt::Display::fmt(d, f),
+                Self::Ack(ref a) => fmt::Display::fmt(a, f),
             }
         }
     }
@@ -118,12 +157,27 @@ pub(crate) mod proto {
         }
     }
 
+    impl fmt::Display for Flow {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if let Some(ref fl) = self.flow {
+                write!(f, "Flow {{ channel_id: {}, {} }}", self.channel_id, fl)
+            } else {
+                f.write_str("Empty flow")
+            }
+        }
+    }
+
+    impl fmt::Display for Acknowledge {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "Acknowledge {{ counter: {}  }}", self.counter,)
+        }
+    }
+
     impl fmt::Display for Data {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(
                 f,
-                "Data {{ channel_id: {:x}, counter: {}, buffer: {} bytes }}",
-                self.channel_id,
+                "Data {{ counter: {}, buffer: {} bytes }}",
                 self.counter,
                 self.buffer.len()
             )
@@ -170,7 +224,10 @@ pub(crate) mod proto {
     impl Message {
         pub fn get_data(&self) -> Option<&Data> {
             match self.msg {
-                Some(message::Msg::Data(ref d)) => Some(d),
+                Some(message::Msg::Flow(ref f)) => match f.flow {
+                    Some(flow::Flow::Data(ref d)) => Some(d),
+                    _ => None,
+                },
                 _ => None,
             }
         }
