@@ -72,6 +72,7 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
 
     assert!(position < buffer.len());
     let dst = buffer.as_mut_ptr();
+    let old_len = buffer.len();
     unsafe {
         // SAFETY: we checked that position is within the slice's bounds
         let src = dst.offset(
@@ -86,7 +87,7 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
         std::intrinsics::copy(src, dst, position);
 
         // SAFETY: position < buffer.len()
-        buffer.set_len(position);
+        buffer.set_len(old_len - position);
     }
 }
 
