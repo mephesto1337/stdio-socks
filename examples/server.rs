@@ -1,62 +1,19 @@
-use std::{
-    io,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-};
+use std::net::SocketAddr;
 
+use multiplex::{self, proto};
 use multiplex::{Error, Multiplexer, Result, Stdio, Stream};
 
-mod socket {
-    include!(concat!(env!("OUT_DIR"), "/socket.rs"));
-}
-
-use prost::Message;
-
-async fn open_stream(req: Vec<u8>) -> Result<Box<dyn Stream>> {
-    let endpoint = socket::Endpoint::decode(&req[..])?;
-
-    let destination = if let Some(ref d) = endpoint.destination {
-        d
-    } else {
-        return Err(Error::AddressResolution("No endpoint given".to_string()));
-    };
-
-    match destination {
-        socket::endpoint::Destination::Unix(filename) => {
-            let handle = match endpoint.proto() {
-                socket::Protocol::Tcp => {
-                    let h = tokio::net::UnixStream::connect(filename).await?;
-                    Box::new(h) as Box<dyn Stream>
-                }
-                socket::Protocol::Udp => {
-                    return Err(Error::IO(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "UDP is not implemented yet",
-                    )));
-                }
-            };
-            Ok(handle)
+async fn open_stream(endpoint: proto::Endpoint) -> Result<Box<dyn Stream>> {
+    match endpoint {
+        proto::Endpoint::UnixSocket { path } => {
+            let handle = tokio::net::UnixStream::connect(path).await?;
+            Ok(Box::new(handle) as Box<dyn Stream>)
         }
-        socket::endpoint::Destination::Ip(ip) => {
-            let port: u16 = ip.port.try_into()?;
-            let host = if let Some(ref h) = ip.host {
-                h
-            } else {
-                return Err(Error::AddressResolution("No host given".to_string()));
-            };
-            let addr: SocketAddr = match host {
-                socket::ip_endpoint::Host::Ip4(ip4) => (Ipv4Addr::from(*ip4), port).into(),
-                socket::ip_endpoint::Host::Ip6(ip6) => {
-                    let mut octects = [0u8; 16];
-                    if ip6.len() != octects.len() {
-                        return Err(Error::AddressResolution(format!(
-                            "IPv6 addresses must be {} bytes long",
-                            octects.len()
-                        )));
-                    }
-                    octects.copy_from_slice(&ip6[..]);
-                    (Ipv6Addr::from(octects), port).into()
-                }
-                socket::ip_endpoint::Host::Hostname(ref name) => {
+        proto::Endpoint::TcpSocket { address, port } => {
+            let addr: SocketAddr = match address {
+                proto::Address::Ipv4(ip4) => (ip4, port).into(),
+                proto::Address::Ipv6(ip6) => (ip6, port).into(),
+                proto::Address::Name(ref name) => {
                     if let Some(addr) = tokio::net::lookup_host(format!("{}:{}", name, port))
                         .await?
                         .next()
@@ -67,19 +24,8 @@ async fn open_stream(req: Vec<u8>) -> Result<Box<dyn Stream>> {
                     }
                 }
             };
-            let handle = match endpoint.proto() {
-                socket::Protocol::Tcp => {
-                    let h = tokio::net::TcpStream::connect(addr).await?;
-                    Box::new(h) as Box<dyn Stream>
-                }
-                socket::Protocol::Udp => {
-                    return Err(Error::IO(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "UDP is not implemented yet",
-                    )));
-                }
-            };
-            Ok(handle)
+            let handle = tokio::net::TcpStream::connect(addr).await?;
+            Ok(Box::new(handle) as Box<dyn Stream>)
         }
     }
 }

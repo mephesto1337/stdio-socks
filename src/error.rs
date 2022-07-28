@@ -12,11 +12,8 @@ pub enum Error {
     /// Underlying I/O Error
     IO(io::Error),
 
-    /// Protobuf decode error
-    Decode(prost::DecodeError),
-
-    /// Protobuf decode error
-    Encode(prost::EncodeError),
+    /// Nom decode error
+    Decode(nom::Err<nom::error::VerboseError<Vec<u8>>>),
 
     /// Invalid port number
     InvalidPortNumber(u32),
@@ -46,8 +43,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IO(ref e) => fmt::Display::fmt(e, f),
-            Self::Decode(ref de) => write!(f, "Protobuf decode error: {}", de),
-            Self::Encode(ref ee) => write!(f, "Protobuf encode error: {}", ee),
+            Self::Decode(ref de) => fmt::Display::fmt(de, f),
             Self::InvalidPortNumber(p) => write!(f, "Invalid port numnber {}", p),
             Self::ChannelClosed => write!(f, "Tried to write into a closed channel"),
             Self::IntegerTruncation(ref e) => write!(f, "Integer truncation: {}", e),
@@ -64,18 +60,6 @@ impl fmt::Display for Error {
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Self::IO(e)
-    }
-}
-
-impl From<prost::DecodeError> for Error {
-    fn from(de: prost::DecodeError) -> Self {
-        Self::Decode(de)
-    }
-}
-
-impl From<prost::EncodeError> for Error {
-    fn from(ee: prost::EncodeError) -> Self {
-        Self::Encode(ee)
     }
 }
 
@@ -101,5 +85,26 @@ impl From<FromUtf8Error> for Error {
 impl<T> From<PoisonError<T>> for Error {
     fn from(_: PoisonError<T>) -> Self {
         Self::LockPoison
+    }
+}
+
+pub fn nom_to_owned(
+    e: nom::Err<nom::error::VerboseError<&[u8]>>,
+) -> nom::Err<nom::error::VerboseError<Vec<u8>>> {
+    match e {
+        nom::Err::Incomplete(i) => nom::Err::Incomplete(i),
+        nom::Err::Error(mut e) => nom::Err::Error(nom::error::VerboseError {
+            errors: e.errors.drain(..).map(|(i, e)| (i.to_owned(), e)).collect(),
+        }),
+        nom::Err::Failure(mut e) => nom::Err::Failure(nom::error::VerboseError {
+            errors: e.errors.drain(..).map(|(i, e)| (i.to_owned(), e)).collect(),
+        }),
+    }
+}
+
+impl<'i> From<nom::Err<nom::error::VerboseError<&'i [u8]>>> for Error {
+    fn from(e: nom::Err<nom::error::VerboseError<&'i [u8]>>) -> Self {
+        let owned = nom_to_owned(e);
+        Self::Decode(owned)
     }
 }

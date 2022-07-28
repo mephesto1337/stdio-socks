@@ -1,18 +1,15 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use bytes::{Buf, BufMut};
+use nom::branch::alt;
+use nom::bytes::streaming::take;
+use nom::combinator::{map, map_opt, verify};
+use nom::error::context;
+use nom::multi::count;
+use nom::number::streaming::{be_u16, be_u8};
+use nom::sequence::{preceded, tuple};
 
-use crate::{Error, Result};
-
-pub trait Wire: Sized {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut;
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
-    where
-        B: Buf;
-}
+use multiplex::proto::Wire;
 
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -21,22 +18,20 @@ pub enum Version {
 }
 
 impl Wire for Version {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        buf.put_u8(*self as u8);
-        Ok(())
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        buffer.push(*self as u8);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        match buf.get_u8() {
-            5 => Ok(Self::Socks5),
-            v => Err(Error::InvalidEnumValue(v as u64, "Version")),
-        }
+        context(
+            "SocksVersion",
+            map(verify(be_u8, |b| *b == Self::Socks5 as u8), |_| {
+                Self::Socks5
+            }),
+        )(buffer)
     }
 }
 
@@ -45,26 +40,27 @@ impl Wire for Version {
 pub enum AuthenticationMethod {
     None = 0,
     // UsernamePassword = 2,
+    NotAcceptable = 0xff,
 }
 
 impl Wire for AuthenticationMethod {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        buf.put_u8(*self as u8);
-        Ok(())
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        buffer.push(*self as u8);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        match buf.get_u8() {
-            0 => Ok(Self::None),
-            // 2 => Ok(Self::UsernamePassword),
-            v => Err(Error::InvalidEnumValue(v as u64, "AuthenticationMethod")),
-        }
+        context(
+            "SocksVersion",
+            alt((
+                map(verify(be_u8, |b| *b == Self::None as u8), |_| Self::None),
+                map(verify(be_u8, |b| *b == Self::NotAcceptable as u8), |_| {
+                    Self::NotAcceptable
+                }),
+            )),
+        )(buffer)
     }
 }
 #[derive(Debug)]
@@ -74,32 +70,26 @@ pub struct Hello {
 }
 
 impl Wire for Hello {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        self.version.serialize(buf)?;
-        buf.put_u8(self.methods.len().try_into()?);
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        self.version.encode_into(buffer);
+        buffer.push(
+            self.methods
+                .len()
+                .try_into()
+                .expect("Too many available methods"),
+        );
         for m in &self.methods {
-            m.serialize(buf)?;
+            m.encode_into(buffer);
         }
-        Ok(())
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        let version = Version::deserialize(buf)?;
-        let nmethods: usize = buf
-            .get_u8()
-            .try_into()
-            .expect("Cannot fit a u8 into a usize?!");
-        let methods = (0..nmethods)
-            .filter_map(|_| AuthenticationMethod::deserialize(buf).ok())
-            .collect::<Vec<_>>();
-
-        Ok(Self { version, methods })
+        let (rest, (version, nmethods)) = tuple((Version::decode, be_u8))(buffer)?;
+        let (rest, methods) = count(AuthenticationMethod::decode, nmethods as usize)(rest)?;
+        Ok((rest, Self { methods, version }))
     }
 }
 
@@ -110,22 +100,18 @@ pub struct HelloResponse {
 }
 
 impl Wire for HelloResponse {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        self.version.serialize(buf)?;
-        self.method.serialize(buf)
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        self.version.encode_into(buffer);
+        self.method.encode_into(buffer);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        let version = Version::deserialize(buf)?;
-        let method = AuthenticationMethod::deserialize(buf)?;
-
-        Ok(Self { version, method })
+        let (rest, (version, method)) =
+            tuple((Version::decode, AuthenticationMethod::decode))(buffer)?;
+        Ok((rest, Self { version, method }))
     }
 }
 
@@ -136,22 +122,20 @@ pub enum Command {
 }
 
 impl Wire for Command {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        buf.put_u8(*self as u8);
-        Ok(())
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        buffer.push(*self as u8);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        match buf.get_u8() {
-            1 => Ok(Self::Connect),
-            v => Err(Error::InvalidEnumValue(v as u64, "Command")),
-        }
+        context(
+            "Socks command",
+            map(verify(be_u8, |b| *b == Self::Connect as u8), |_| {
+                Self::Connect
+            }),
+        )(buffer)
     }
 }
 
@@ -162,85 +146,95 @@ pub enum AddressType {
     IPv6(Ipv6Addr),
 }
 
+fn encode_hostname(buffer: &mut Vec<u8>, name: &str) {
+    let name_sz: u8 = name.len().try_into().expect("Name too long");
+    buffer.push(name_sz);
+    buffer.extend_from_slice(name.as_bytes());
+}
+
+fn decode_hostname<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], String, E>
+where
+    E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
+{
+    let (rest, name_len) = be_u8(buffer)?;
+    let (rest, name) = map_opt(take(name_len as usize), |b| {
+        std::str::from_utf8(b).map(|s| s.to_owned()).ok()
+    })(rest)?;
+    Ok((rest, name))
+}
+
 impl Wire for AddressType {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
         match self {
             Self::IPv4(ref ip4) => {
-                buf.put_u8(1);
-                ip4.serialize(buf)
+                buffer.push(1);
+                encode_ipv4(ip4, buffer);
             }
             Self::IPv6(ref ip6) => {
-                buf.put_u8(4);
-                ip6.serialize(buf)
+                buffer.push(4);
+                encode_ipv6(ip6, buffer);
             }
             Self::DomainName(ref name) => {
-                buf.put_u8(3);
-                name.serialize(buf)
+                buffer.push(3);
+                encode_hostname(buffer, name);
             }
         }
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        match buf.get_u8() {
-            1 => {
-                let ip4 = Ipv4Addr::deserialize(buf)?;
-                Ok(Self::IPv4(ip4))
-            }
-            3 => {
-                let name = String::deserialize(buf)?;
-                Ok(Self::DomainName(name))
-            }
-            4 => {
-                let ip6 = Ipv6Addr::deserialize(buf)?;
-                Ok(Self::IPv6(ip6))
-            }
-            v => Err(Error::InvalidEnumValue(v as u64, "AddressType")),
-        }
+        context(
+            "Socks address",
+            alt((
+                preceded(
+                    verify(be_u8, |b| *b == 1),
+                    map(decode_ipv4, |ip4| Self::IPv4(ip4)),
+                ),
+                preceded(
+                    verify(be_u8, |b| *b == 3),
+                    map(decode_hostname, |name| Self::DomainName(name)),
+                ),
+                preceded(
+                    verify(be_u8, |b| *b == 4),
+                    map(decode_ipv6, |ip6| Self::IPv6(ip6)),
+                ),
+            )),
+        )(buffer)
     }
 }
 
-impl Wire for Ipv4Addr {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        for b in self.octets() {
-            buf.put_u8(b);
-        }
-        Ok(())
-    }
-
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
-    where
-        B: Buf,
-    {
-        Ok(Self::from(buf.get_u32()))
+fn encode_ipv4(ip4: &Ipv4Addr, buffer: &mut Vec<u8>) {
+    for b in ip4.octets() {
+        buffer.push(b);
     }
 }
 
-impl Wire for Ipv6Addr {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        for b in self.octets() {
-            buf.put_u8(b);
-        }
-        Ok(())
-    }
+fn decode_ipv4<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Ipv4Addr, E>
+where
+    E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
+{
+    let mut octets = [0u8; 4];
+    let (rest, bytes) = take(4usize)(buffer)?;
+    octets.copy_from_slice(bytes);
+    Ok((rest, Ipv4Addr::from(octets)))
+}
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
-    where
-        B: Buf,
-    {
-        Ok(Self::from(buf.get_u128()))
+fn encode_ipv6(ip6: &Ipv6Addr, buffer: &mut Vec<u8>) {
+    for b in ip6.octets() {
+        buffer.push(b);
     }
+}
+
+fn decode_ipv6<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Ipv6Addr, E>
+where
+    E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
+{
+    let mut octets = [0u8; 16];
+    let (rest, bytes) = take(16usize)(buffer)?;
+    octets.copy_from_slice(bytes);
+    Ok((rest, Ipv6Addr::from(octets)))
 }
 
 impl fmt::Display for AddressType {
@@ -253,31 +247,6 @@ impl fmt::Display for AddressType {
     }
 }
 
-impl Wire for String {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        let size: u8 = self.len().try_into()?;
-        buf.put_u8(size);
-        buf.put_slice(self.as_bytes());
-        Ok(())
-    }
-
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
-    where
-        B: Buf,
-    {
-        let size: usize = buf
-            .get_u8()
-            .try_into()
-            .expect("Cannot convert a u8 into a usize?!");
-        let data = buf.chunk()[..size].to_vec();
-        buf.advance(size);
-        Ok(String::from_utf8(data)?)
-    }
-}
-
 #[derive(Debug)]
 pub struct Request {
     pub version: Version,
@@ -287,33 +256,34 @@ pub struct Request {
 }
 
 impl Wire for Request {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        self.version.serialize(buf)?;
-        self.command.serialize(buf)?;
-        buf.put_u8(0);
-        self.addr.serialize(buf)?;
-        buf.put_u16(self.port);
-        Ok(())
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        self.version.encode_into(buffer);
+        self.command.encode_into(buffer);
+        buffer.push(0);
+        self.addr.encode_into(buffer);
+        buffer.extend_from_slice(&self.port.to_be_bytes()[..]);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        let version = Version::deserialize(buf)?;
-        let command = Command::deserialize(buf)?;
-        let _zero = buf.get_u8();
-        let addr = AddressType::deserialize(buf)?;
-        let port = buf.get_u16();
-        Ok(Self {
-            version,
-            command,
-            addr,
-            port,
-        })
+        let (rest, (version, command, _zero, addr, port)) = tuple((
+            Version::decode,
+            Command::decode,
+            be_u8,
+            AddressType::decode,
+            be_u16,
+        ))(buffer)?;
+        Ok((
+            rest,
+            Self {
+                version,
+                command,
+                addr,
+                port,
+            },
+        ))
     }
 }
 
@@ -325,23 +295,25 @@ pub enum Status {
 }
 
 impl Wire for Status {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        buf.put_u8(*self as u8);
-        Ok(())
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        buffer.push(*self as u8);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        match buf.get_u8() {
-            0 => Ok(Self::Success),
-            1 => Ok(Self::GeneralFailure),
-            v => Err(Error::InvalidEnumValue(v as u64, "Command")),
-        }
+        context(
+            "Socks status",
+            alt((
+                map(verify(be_u8, |b| *b == Self::Success as u8), |_| {
+                    Self::Success
+                }),
+                map(verify(be_u8, |b| *b == Self::GeneralFailure as u8), |_| {
+                    Self::GeneralFailure
+                }),
+            )),
+        )(buffer)
     }
 }
 
@@ -354,32 +326,36 @@ pub struct Response {
 }
 
 impl Wire for Response {
-    fn serialize<B>(&self, buf: &mut B) -> Result<()>
-    where
-        B: BufMut,
-    {
-        self.version.serialize(buf)?;
-        self.status.serialize(buf)?;
-        buf.put_u8(0);
-        self.addr.serialize(buf)?;
-        buf.put_u16(self.port);
-        Ok(())
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        self.version.encode_into(buffer);
+        self.status.encode_into(buffer);
+        buffer.push(0);
+        self.addr.encode_into(buffer);
+        buffer.extend_from_slice(&self.port.to_be_bytes()[..]);
     }
 
-    fn deserialize<B>(buf: &mut B) -> Result<Self>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
-        B: Buf,
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        let version = Version::deserialize(buf)?;
-        let status = Status::deserialize(buf)?;
-        let _zero = buf.get_u8();
-        let addr = AddressType::deserialize(buf)?;
-        let port = buf.get_u16();
-        Ok(Self {
-            version,
-            status,
-            addr,
-            port,
-        })
+        let (rest, (version, status, _zero, addr, port)) = context(
+            "Socks response",
+            tuple((
+                Version::decode,
+                Status::decode,
+                be_u8,
+                AddressType::decode,
+                be_u16,
+            )),
+        )(buffer)?;
+        Ok((
+            rest,
+            Self {
+                version,
+                status,
+                addr,
+                port,
+            },
+        ))
     }
 }
