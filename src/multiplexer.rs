@@ -72,7 +72,7 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
 
     assert!(position < buffer.len());
     let dst = buffer.as_mut_ptr();
-    let old_len = buffer.len();
+    let new_len = buffer.len() - position;
     unsafe {
         // SAFETY: we checked that position is within the slice's bounds
         let src = dst.offset(
@@ -81,13 +81,13 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
                 .expect("Cannot fit a usize into a isize"),
         );
         // SAFETY:
-        // * src is valid for reads  of `position * sizeof::<T>()`
-        // * dst is valid for writes of `position * sizeof::<T>()`
+        // * src is valid for reads  of `new_len * sizeof::<T>()`
+        // * dst is valid for writes of `buf.len() * sizeof::<T>()` and `new_len < buf.len()`
         // * both src and dst are properly aligned
-        std::intrinsics::copy(src, dst, position);
+        std::intrinsics::copy(src, dst, new_len);
 
-        // SAFETY: position < buffer.len()
-        buffer.set_len(old_len - position);
+        // SAFETY: new_len < buffer.len()
+        buffer.set_len(new_len);
     }
 }
 
