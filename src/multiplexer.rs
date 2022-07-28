@@ -52,9 +52,9 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
         return;
     }
 
-    let old_len = buffer.len();
     let dst = buffer.as_mut_ptr();
     assert!(position < buffer.len());
+    let new_len = buffer.len() - position;
     unsafe {
         // SAFETY: we checked that position is within the slice's bounds
         let src = dst.offset(
@@ -66,10 +66,10 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
         // * src is valid for reads  of `position * sizeof::<T>()`
         // * dst is valid for writes of `position * sizeof::<T>()`
         // * both src and dst are properly aligned
-        std::intrinsics::copy(src, dst, position);
+        std::intrinsics::copy(src, dst, new_len);
 
         // SAFETY: position < buffer.len()
-        buffer.set_len(old_len - position);
+        buffer.set_len(new_len);
     }
 }
 
@@ -99,10 +99,10 @@ where
     match Message::decode::<nom::error::VerboseError<&[u8]>>(&buffer[..]) {
         Ok((rest, msg)) => {
             let new_len = rest.len();
-            let consumed_bytes = dbg!(buffer.len()) - dbg!(rest.len());
+            let consumed_bytes = buffer.len() - rest.len();
             tracing::trace!("Resizing buffer, shift of {}", consumed_bytes);
             tracing::trace!("{:?} => {:?}", &buffer[..consumed_bytes], &msg);
-            buffer_memmove(buffer, dbg!(consumed_bytes));
+            buffer_memmove(buffer, consumed_bytes);
             assert_eq!(buffer.len(), new_len);
             Ok(Some(msg))
         }
@@ -119,7 +119,7 @@ where
                 Ok(None)
             }
             nom::Err::Error(e) => {
-                tracing::debug!(
+                tracing::warn!(
                     "[{}] Decode error (recoverable): {}",
                     name,
                     crate::error::nom_to_owned(nom::Err::Error(e))
