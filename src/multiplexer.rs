@@ -310,6 +310,7 @@ impl Multiplexer {
                 channel_id,
                 endpoint,
             } => {
+                tracing::info!("Channel {} associated with {}", channel_id, &endpoint);
                 let stream = open_stream(endpoint).await?;
                 let mut channel = self.create_channel_with_id(channel_id, stream)?;
                 self.send(crate::proto::Response::New { channel_id })
