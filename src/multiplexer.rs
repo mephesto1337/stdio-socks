@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::sync::{Arc, Mutex, RwLock};
@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use prost::Message;
-
+use crate::proto::{Endpoint, Message, Wire};
 use crate::{ChannelId, Result};
 
 /// Trait for AsyncRead + AsyncWrite objects
@@ -18,7 +17,7 @@ impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Sync + Unpin {}
 /// Server part for the multiplexer
 pub struct Multiplexer {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
-    channels: RwLock<HashMap<ChannelId, mpsc::Sender<crate::proto::Flow>>>,
+    channels: RwLock<HashMap<ChannelId, mpsc::Sender<Vec<u8>>>>,
 
     /// A Sender to give to each worker
     tx: mpsc::Sender<crate::proto::Message>,
@@ -30,8 +29,6 @@ pub struct Multiplexer {
     name: String,
 }
 
-const CHANNEL_WINDOW_SIZE: u64 = 5;
-
 /// A channel to interact with a single client
 pub struct Channel {
     /// It's identifier
@@ -41,25 +38,10 @@ pub struct Channel {
     tx: mpsc::Sender<crate::proto::Message>,
 
     /// queue to receive message
-    rx: mpsc::Receiver<crate::proto::Flow>,
+    rx: mpsc::Receiver<Vec<u8>>,
 
     /// Stream associated
     stream: Box<dyn Stream>,
-
-    /// Unack messages
-    unack_messages: VecDeque<crate::proto::Data>,
-
-    /// Future messages
-    future_messages: VecDeque<crate::proto::Data>,
-
-    /// Expected counter from remote
-    expected_counter: u64,
-
-    /// Current counter
-    counter: u64,
-
-    /// Last acknowledged counter
-    last_ack_counter: u64,
 }
 
 fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
@@ -70,8 +52,9 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
         return;
     }
 
-    assert!(position < buffer.len());
+    let old_len = buffer.len();
     let dst = buffer.as_mut_ptr();
+    assert!(position < buffer.len());
     unsafe {
         // SAFETY: we checked that position is within the slice's bounds
         let src = dst.offset(
@@ -86,15 +69,15 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
         std::intrinsics::copy(src, dst, position);
 
         // SAFETY: position < buffer.len()
-        buffer.set_len(position);
+        buffer.set_len(old_len - position);
     }
 }
 
-async fn recv_message<S>(
+async fn recv_message<'i, S>(
     name: &str,
     stream: &mut S,
     buffer: &mut Vec<u8>,
-) -> Result<Option<crate::proto::message::Msg>>
+) -> Result<Option<crate::proto::Message>>
 where
     S: AsyncRead + Send + Sync + Unpin,
 {
@@ -113,33 +96,38 @@ where
         );
     }
     assert_eq!(buffer.len(), start + size);
-    let mut cursor = std::io::Cursor::new(&buffer[..]);
-    // FIXME: this methods consumes the whole buffer and returns the last message. It should
-    // return the first message and not consume the rest
-    match crate::proto::Message::decode(&mut cursor) {
-        Ok(msg) => {
-            if let Some(msg) = msg.msg {
-                let position: usize = cursor
-                    .position()
-                    .try_into()
-                    .expect("Cannot convert u64 to usize");
-                // forget already read elements and shift the rest to the begin
-                tracing::trace!("Resizing buffer, shift of {}", position);
-                buffer_memmove(buffer, position);
-
-                Ok(Some(msg))
-            } else {
+    match Message::decode::<nom::error::VerboseError<&[u8]>>(&buffer[..]) {
+        Ok((rest, msg)) => {
+            let new_len = rest.len();
+            let consumed_bytes = dbg!(buffer.len()) - dbg!(rest.len());
+            tracing::trace!("Resizing buffer, shift of {}", consumed_bytes);
+            tracing::trace!("{:?} => {:?}", &buffer[..consumed_bytes], &msg);
+            buffer_memmove(buffer, dbg!(consumed_bytes));
+            assert_eq!(buffer.len(), new_len);
+            Ok(Some(msg))
+        }
+        Err(e) => match e {
+            nom::Err::Incomplete(i) => {
+                match i {
+                    nom::Needed::Unknown => {
+                        tracing::debug!("[{}] Decode error missing bytes", name);
+                    }
+                    nom::Needed::Size(s) => {
+                        tracing::debug!("[{}] Decode error missing {} bytes", name, s);
+                    }
+                }
                 Ok(None)
             }
-        }
-        Err(e) => {
-            tracing::debug!(
-                "[{}] Decode error (possible unterminated read): {}",
-                name,
-                e
-            );
-            Ok(None)
-        }
+            nom::Err::Error(e) => {
+                tracing::debug!(
+                    "[{}] Decode error (recoverable): {}",
+                    name,
+                    crate::error::nom_to_owned(nom::Err::Error(e))
+                );
+                Ok(None)
+            }
+            nom::Err::Failure(e) => Err(nom::Err::Failure(e).into()),
+        },
     }
 }
 
@@ -160,11 +148,6 @@ impl Multiplexer {
             tx: self.tx.clone(),
             rx,
             stream: output,
-            unack_messages: VecDeque::new(),
-            future_messages: VecDeque::new(),
-            expected_counter: 0,
-            counter: 0,
-            last_ack_counter: 0,
         })
     }
 
@@ -189,7 +172,7 @@ impl Multiplexer {
     ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Send + Sync + Unpin,
-        O: Fn(Vec<u8>) -> F,
+        O: Fn(Endpoint) -> F,
         F: Future<Output = Result<Box<dyn Stream>>> + Send + Sync + Unpin,
     {
         let mut rx_buffer = Vec::with_capacity(8192);
@@ -217,7 +200,7 @@ impl Multiplexer {
                         Some(msg) => {
                             tracing::trace!("[{}] Sending  message to   stream: {}", &self.name, &msg);
                             tx_buffer.clear();
-                            msg.encode(&mut tx_buffer)?;
+                            msg.encode_into(&mut tx_buffer);
                             stream.write_all(&tx_buffer[..]).await?;
                             stream.flush().await?;
                         },
@@ -235,51 +218,34 @@ impl Multiplexer {
 
     async fn dispatch_message<O, F>(
         self: Arc<Self>,
-        message: crate::proto::message::Msg,
+        message: Message,
         open_stream: &O,
     ) -> Result<()>
     where
-        O: Fn(Vec<u8>) -> F,
+        O: Fn(Endpoint) -> F,
         F: Future<Output = Result<Box<dyn Stream>>> + Send + Sync + Unpin,
     {
         match message {
-            crate::proto::message::Msg::Request(r) => {
-                if let Some(r) = r.request {
-                    self.dispatch_request(r, open_stream).await
-                } else {
-                    tracing::warn!("[{}] Empty request received", &self.name);
-                    Ok(())
-                }
-            }
-            crate::proto::message::Msg::Response(r) => {
-                if let Some(r) = r.response {
-                    self.dispatch_response(r).await
-                } else {
-                    tracing::warn!("[{}] Empty response received", &self.name);
-                    Ok(())
-                }
-            }
-            crate::proto::message::Msg::Flow(flow) => {
+            Message::Request(r) => self.dispatch_request(r, open_stream).await,
+            Message::Response(r) => self.dispatch_response(r).await,
+            Message::Data { channel_id, buffer } => {
                 let tx = {
                     let channels = self.channels.read()?;
-                    if let Some(tx) = channels.get(&flow.channel_id).map(|tx| tx.clone()) {
-                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &flow.channel_id);
+                    if let Some(tx) = channels.get(&channel_id).map(|tx| tx.clone()) {
+                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &channel_id);
                         Ok(tx)
                     } else {
                         tracing::warn!(
                             "[{}] Tried to write into a closed channel ({})",
                             &self.name,
-                            flow.channel_id
+                            channel_id
                         );
 
-                        Err((
-                            flow.channel_id,
-                            format!("Channel {} is closed", flow.channel_id),
-                        ))
+                        Err((channel_id, format!("Channel {} is closed", channel_id)))
                     }
                 };
                 match tx {
-                    Ok(tx) => tx.send(flow).await?,
+                    Ok(tx) => tx.send(buffer).await?,
                     Err(e) => self.send(e).await?,
                 }
                 Ok(())
@@ -296,14 +262,14 @@ impl Multiplexer {
         }
     }
 
-    async fn dispatch_response(
-        self: Arc<Self>,
-        response: crate::proto::response::Response,
-    ) -> Result<()> {
+    async fn dispatch_response(self: Arc<Self>, response: crate::proto::Response) -> Result<()> {
         let (channel_id, result) = match response {
-            crate::proto::response::Response::Error(e) => (e.channel_id, Err(e.error)),
-            crate::proto::response::Response::New(n) => (n.channel_id, Ok(())),
-            crate::proto::response::Response::Close(c) => (c.channel_id, Ok(())),
+            crate::proto::Response::Error {
+                channel_id,
+                message,
+            } => (channel_id, Err(message)),
+            crate::proto::Response::New { channel_id } => (channel_id, Ok(())),
+            crate::proto::Response::Close { channel_id } => (channel_id, Ok(())),
         };
         let maybe_tx = {
             let mut queue = self.queue.lock()?;
@@ -332,50 +298,45 @@ impl Multiplexer {
 
     async fn dispatch_request<F, O>(
         self: Arc<Self>,
-        request: crate::proto::request::Request,
+        request: crate::proto::Request,
         open_stream: &O,
     ) -> Result<()>
     where
-        O: Fn(Vec<u8>) -> F,
+        O: Fn(Endpoint) -> F,
         F: Future<Output = Result<Box<dyn Stream>>> + Send + Sync + Unpin,
     {
         match request {
-            crate::proto::request::Request::New(new) => {
-                let stream = open_stream(new.endpoint).await?;
-                let mut channel = self.create_channel_with_id(new.channel_id, stream)?;
-                self.send(crate::proto::ResponseChannelNew {
-                    channel_id: new.channel_id,
-                })
-                .await?;
+            crate::proto::Request::New {
+                channel_id,
+                endpoint,
+            } => {
+                let stream = open_stream(endpoint).await?;
+                let mut channel = self.create_channel_with_id(channel_id, stream)?;
+                self.send(crate::proto::Response::New { channel_id })
+                    .await?;
                 tokio::spawn(async move {
                     if let Err(e) = channel.pipe().await {
                         tracing::error!(
                             "[{}] Error wich channel {}: {}",
                             &self.name,
-                            new.channel_id,
+                            channel_id,
                             e
                         );
                     }
                 });
             }
-            crate::proto::request::Request::Close(close) => {
+            crate::proto::Request::Close { channel_id } => {
                 let maybe_tx = {
                     let mut channels = self.channels.write()?;
-                    channels.remove(&close.channel_id).map(|_| ())
+                    channels.remove(&channel_id).map(|_| ())
                 };
                 if maybe_tx.is_some() {
-                    tracing::debug!("[{}] Closing channel {}", &self.name, close.channel_id);
-                    self.send(crate::proto::ResponseChannelNew {
-                        channel_id: close.channel_id,
-                    })
-                    .await?;
+                    tracing::debug!("[{}] Closing channel {}", &self.name, channel_id);
+                    self.send(crate::proto::Response::Close { channel_id })
+                        .await?;
                 } else {
-                    tracing::debug!(
-                        "[{}] Closing unexisting channel {}",
-                        &self.name,
-                        close.channel_id
-                    );
-                    self.send((close.channel_id, format!("Unknown channel ID")))
+                    tracing::debug!("[{}] Closing unexisting channel {}", &self.name, channel_id);
+                    self.send((channel_id, format!("Unknown channel ID")))
                         .await?;
                 }
             }
@@ -388,30 +349,29 @@ impl Multiplexer {
         self: Arc<Self>,
         channel_id: ChannelId,
     ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
-        let req =
-            crate::proto::request::Request::Close(crate::proto::RequestChannelClose { channel_id });
+        let req = crate::proto::Request::Close { channel_id };
         self.request(req).await
     }
 
     pub async fn request_open(
         self: Arc<Self>,
         channel_id: ChannelId,
-        endpoint: Vec<u8>,
+        endpoint: Endpoint,
     ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
-        let req = crate::proto::request::Request::New(crate::proto::RequestChannelNew {
+        let req = crate::proto::Request::New {
             channel_id,
             endpoint,
-        });
+        };
         self.request(req).await
     }
 
     async fn request(
         self: Arc<Self>,
-        request: crate::proto::request::Request,
+        request: crate::proto::Request,
     ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
         let channel_id = match request {
-            crate::proto::request::Request::New(ref n) => n.channel_id,
-            crate::proto::request::Request::Close(ref c) => c.channel_id,
+            crate::proto::Request::New { channel_id, .. } => channel_id,
+            crate::proto::Request::Close { channel_id } => channel_id,
         };
         let (tx, rx) = oneshot::channel();
         self.send(request).await?;
@@ -424,76 +384,18 @@ impl Multiplexer {
 }
 
 impl Channel {
-    fn update_ack(&mut self, counter: u64) {
-        let mut i = 0;
-        while i < self.unack_messages.len() {
-            if self.unack_messages[i].counter <= counter {
-                self.unack_messages.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-        assert!(self.last_ack_counter <= counter);
-        self.last_ack_counter = counter;
-    }
-
-    async fn resend_unack(&mut self) -> Result<()> {
-        for message in &self.unack_messages {
-            self.tx.send((self.id, message.clone()).into()).await?;
-        }
-
-        Ok(())
-    }
-
-    fn insert_future(&mut self, data: crate::proto::Data) {
-        let pos = match self
-            .future_messages
-            .binary_search_by_key(&data.counter, |d| d.counter)
-        {
-            Ok(pos) => {
-                if self.future_messages[pos].buffer != data.buffer {
-                    tracing::error!(
-                        "Got duplicate chunk with different data at {}. Ignoring.",
-                        data.counter
-                    );
-                }
-                return;
-            }
-            Err(pos) => pos,
-        };
-        self.future_messages.insert(pos, data);
-    }
-
-    async fn send_futures(&mut self) -> Result<()> {
-        while self.future_messages.len() > 0 {
-            if self.expected_counter == self.future_messages[0].counter {
-                let data = self.future_messages.pop_front().unwrap();
-                self.tx.send((self.id, data).into()).await?;
-                self.expected_counter += 1;
-            }
-        }
-
-        Ok(())
-    }
-
     pub async fn pipe(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
 
-        self.resend_unack().await?;
         loop {
             tokio::select! {
-                res = self.stream.read(&mut buffer[..]), if self.counter - self.last_ack_counter < CHANNEL_WINDOW_SIZE => {
+                res = self.stream.read(&mut buffer[..]) => {
                     match res {
                         Ok(0) => {
                             tracing::debug!("Stream has ended");
                             break;
                         },
-                        Ok(n) => {
-                            let data: crate::proto::Data = (self.counter, buffer[..n].to_vec()).into();
-                            self.unack_messages.push_back(data.clone());
-                            self.counter += 1;
-                            self.tx.send((self.id, data).into()).await?;
-                        },
+                        Ok(n) => self.tx.send((self.id, buffer[..n].to_vec()).into()).await?,
                         Err(e) => {
                             tracing::warn!("Got error while reading stream: {}", &e);
                             return Err(e.into());
@@ -502,28 +404,7 @@ impl Channel {
                 },
                 maybe_data = self.rx.recv() => {
                     match maybe_data {
-                        Some(crate::proto::Flow { flow: Some(flow), ..}) => {
-                            match flow {
-                                crate::proto::flow::Flow::Data(data) => {
-                                    if data.counter == self.expected_counter {
-                                        self.stream.write_all(&data.buffer[..]).await?;
-                                        self.expected_counter += 1;
-                                        self.send_futures().await?;
-                                        let ack: crate::proto::Message = (self.id, self.expected_counter - 1).into();
-                                        self.tx.send(ack).await?;
-                                    } else {
-                                        tracing::warn!("Got future packet, do not send ACK (expected: {}, received: {})", self.expected_counter, data.counter);
-                                        self.insert_future(data);
-                                    }
-                                }
-                                crate::proto::flow::Flow::Ack(ack) => {
-                                    self.update_ack(ack.counter);
-                                }
-                            }
-                        },
-                        Some(crate::proto::Flow { channel_id, flow: None }) => {
-                            tracing::warn!("Invalid Flow message received on channel {}", channel_id);
-                        }
+                        Some(data) => self.stream.write_all(&data[..]).await?,
                         None => {
                             tracing::warn!("All tx have been dropped");
                             break;

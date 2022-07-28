@@ -7,16 +7,10 @@ use tokio::net::{TcpListener, TcpStream};
 
 use clap::Parser;
 
-use prost::Message;
-
+use multiplex::proto::{self, Wire};
 use multiplex::{ChannelId, Error, Multiplexer, Result, Stdio, Stream};
 
 mod socks;
-use socks::Wire;
-
-mod socket {
-    include!(concat!(env!("OUT_DIR"), "/socket.rs"));
-}
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -35,41 +29,41 @@ async fn handshake(
     let size = client.read(&mut rx_buffer[..]).await?;
 
     // Hello
-    let _hello = socks::Hello::deserialize(&mut &rx_buffer[..size])?;
+    let (_rest, hello) = socks::Hello::decode(&mut &rx_buffer[..size])?;
+    if !hello.methods.contains(&socks::AuthenticationMethod::None) {
+        let response = socks::HelloResponse {
+            version: socks::Version::Socks5,
+            method: socks::AuthenticationMethod::NotAcceptable,
+        };
+        tx_buffer.clear();
+        response.encode_into(&mut tx_buffer);
+        client.write_all(&tx_buffer[..]).await?;
+
+        return Ok(());
+    }
     let response = socks::HelloResponse {
         version: socks::Version::Socks5,
         method: socks::AuthenticationMethod::None,
     };
 
     tx_buffer.clear();
-    response.serialize(&mut tx_buffer)?;
+    response.encode_into(&mut tx_buffer);
     client.write_all(&tx_buffer[..]).await?;
 
     // Connect request
     let size = client.read(&mut rx_buffer[..]).await?;
-    let request = socks::Request::deserialize(&mut &rx_buffer[..size])?;
+    let (_rest, request) = socks::Request::decode(&mut &rx_buffer[..size])?;
 
-    let host = match request.addr {
-        socks::AddressType::IPv4(ref ip4) => {
-            socket::ip_endpoint::Host::Ip4(u32::from_be_bytes(ip4.octets()))
-        }
-        socks::AddressType::IPv6(ref ip6) => socket::ip_endpoint::Host::Ip6(ip6.octets().to_vec()),
-        socks::AddressType::DomainName(ref name) => {
-            socket::ip_endpoint::Host::Hostname(name.clone())
-        }
+    let address = match request.addr {
+        socks::AddressType::IPv4(ref ip4) => proto::Address::Ipv4(ip4.clone()),
+        socks::AddressType::IPv6(ref ip6) => proto::Address::Ipv6(ip6.clone()),
+        socks::AddressType::DomainName(ref name) => proto::Address::Name(name.clone()),
     };
-    let req = socket::Endpoint {
-        proto: socket::Protocol::Tcp as i32,
-        destination: Some(socket::endpoint::Destination::Ip(socket::IpEndpoint {
-            port: request
-                .port
-                .try_into()
-                .expect("Cannot fit a u16 into a u32"),
-            host: Some(host),
-        })),
+    let endpoint = proto::Endpoint::TcpSocket {
+        address,
+        port: request.port,
     };
-    let raw_req = req.encode_to_vec();
-    let rx = Arc::clone(&mp).request_open(channel_id, raw_req).await?;
+    let rx = Arc::clone(&mp).request_open(channel_id, endpoint).await?;
     let result = match rx.await {
         Ok(v) => v,
         Err(e) => {
@@ -91,7 +85,7 @@ async fn handshake(
             port: request.port,
         };
         tx_buffer.clear();
-        response.serialize(&mut tx_buffer)?;
+        response.encode_into(&mut tx_buffer);
         client.write_all(&tx_buffer[..]).await?;
         return Ok(());
     }
@@ -103,14 +97,14 @@ async fn handshake(
         port: request.port,
     };
     tx_buffer.clear();
-    response.serialize(&mut tx_buffer)?;
+    response.encode_into(&mut tx_buffer);
     client.write_all(&tx_buffer[..]).await?;
 
     let mut channel = mp.create_channel_with_id(channel_id, Box::new(client) as Box<dyn Stream>)?;
     channel.pipe().await
 }
 
-async fn open_stream(_: Vec<u8>) -> Result<Box<dyn Stream>> {
+async fn open_stream(_: proto::Endpoint) -> Result<Box<dyn Stream>> {
     Err(Error::IO(io::Error::new(
         io::ErrorKind::Unsupported,
         "No operation supported in client mode",
