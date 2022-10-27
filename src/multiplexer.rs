@@ -10,9 +10,9 @@ use crate::proto::{Endpoint, Message, Wire};
 use crate::{ChannelId, Result};
 
 /// Trait for AsyncRead + AsyncWrite objects
-pub trait Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
+pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin {}
 
-impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Sync + Unpin {}
+impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Unpin {}
 
 /// Server part for the multiplexer
 pub struct Multiplexer {
@@ -79,7 +79,7 @@ async fn recv_message<'i, S>(
     buffer: &mut Vec<u8>,
 ) -> Result<Option<crate::proto::Message>>
 where
-    S: AsyncRead + Send + Sync + Unpin,
+    S: AsyncRead + Send + Unpin,
 {
     let start = buffer.len();
     buffer.reserve(4096);
@@ -171,9 +171,9 @@ impl Multiplexer {
         open_stream: &O,
     ) -> Result<()>
     where
-        S: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+        S: AsyncRead + AsyncWrite + Send + Unpin,
         O: Fn(Endpoint) -> F,
-        F: Future<Output = Result<Box<dyn Stream>>> + Send + Sync + Unpin,
+        F: Future<Output = Result<Box<dyn Stream>>> + Send + Unpin,
     {
         let mut rx_buffer = Vec::with_capacity(8192);
         let mut tx_buffer = Vec::with_capacity(8192);
@@ -223,7 +223,7 @@ impl Multiplexer {
     ) -> Result<()>
     where
         O: Fn(Endpoint) -> F,
-        F: Future<Output = Result<Box<dyn Stream>>> + Send + Sync + Unpin,
+        F: Future<Output = Result<Box<dyn Stream>>> + Send + Unpin,
     {
         match message {
             Message::Request(r) => self.dispatch_request(r, open_stream).await,
@@ -303,7 +303,7 @@ impl Multiplexer {
     ) -> Result<()>
     where
         O: Fn(Endpoint) -> F,
-        F: Future<Output = Result<Box<dyn Stream>>> + Send + Sync + Unpin,
+        F: Future<Output = Result<Box<dyn Stream>>> + Send + Unpin,
     {
         match request {
             crate::proto::Request::New {
