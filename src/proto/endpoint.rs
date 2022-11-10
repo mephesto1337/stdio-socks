@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::SocketAddr;
 
 use super::address::Address;
 use super::{decode_string, encode_string, Wire};
@@ -16,6 +17,21 @@ pub enum Endpoint {
     UnixSocket { path: String },
     /// A TCP endpoint
     TcpSocket { address: Address, port: u16 },
+}
+
+impl From<SocketAddr> for Endpoint {
+    fn from(s: SocketAddr) -> Self {
+        match s {
+            SocketAddr::V4(saddr4) => Self::TcpSocket {
+                address: saddr4.ip().clone().into(),
+                port: saddr4.port(),
+            },
+            SocketAddr::V6(saddr6) => Self::TcpSocket {
+                address: saddr6.ip().clone().into(),
+                port: saddr6.port(),
+            },
+        }
+    }
 }
 
 const ENDPOINT_TYPE_UNIX: u8 = 1;

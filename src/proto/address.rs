@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use nom::branch::alt;
 use nom::bytes::streaming::take;
@@ -23,6 +23,27 @@ pub enum Address {
     Ipv6(Ipv6Addr),
     /// Hostname
     Name(String),
+}
+
+impl From<Ipv4Addr> for Address {
+    fn from(ip4: Ipv4Addr) -> Self {
+        Self::Ipv4(ip4)
+    }
+}
+
+impl From<Ipv6Addr> for Address {
+    fn from(ip6: Ipv6Addr) -> Self {
+        Self::Ipv6(ip6)
+    }
+}
+
+impl From<IpAddr> for Address {
+    fn from(e: IpAddr) -> Self {
+        match e {
+            IpAddr::V4(ip4) => Self::Ipv4(ip4),
+            IpAddr::V6(ip6) => Self::Ipv6(ip6),
+        }
+    }
 }
 
 fn decode_ipv4<'i, E>(input: &'i [u8]) -> nom::IResult<&[u8], Ipv4Addr, E>

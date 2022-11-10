@@ -9,4 +9,4 @@ mod stdio;
 pub use stdio::Stdio;
 
 mod multiplexer;
-pub use multiplexer::{Channel, Multiplexer, Stream};
+pub use multiplexer::{Channel, Multiplexer, OpenStreamResult, Stream};

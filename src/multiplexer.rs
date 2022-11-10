@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::proto::{Endpoint, Message, Wire};
+use crate::proto::{Endpoint, Message, Response, Wire};
 use crate::{ChannelId, Result};
 
 /// Trait for AsyncRead + AsyncWrite objects
@@ -23,7 +23,7 @@ pub struct Multiplexer {
     tx: mpsc::Sender<crate::proto::Message>,
 
     /// Waiting responses
-    queue: Mutex<HashMap<ChannelId, oneshot::Sender<std::result::Result<(), String>>>>,
+    queue: Mutex<HashMap<ChannelId, oneshot::Sender<std::result::Result<Response, String>>>>,
 
     /// Name of this multiplexer (mostly used to identify logs lines)
     name: String,
@@ -131,6 +131,8 @@ where
     }
 }
 
+pub type OpenStreamResult = Result<(Box<dyn Stream>, Option<Endpoint>)>;
+
 impl Multiplexer {
     pub fn create_channel_with_id(
         &self,
@@ -173,7 +175,7 @@ impl Multiplexer {
     where
         S: AsyncRead + AsyncWrite + Send + Unpin,
         O: Fn(Endpoint) -> F,
-        F: Future<Output = Result<Box<dyn Stream>>> + Send + Unpin,
+        F: Future<Output = OpenStreamResult> + Send + Unpin,
     {
         let mut rx_buffer = Vec::with_capacity(8192);
         let mut tx_buffer = Vec::with_capacity(8192);
@@ -223,7 +225,7 @@ impl Multiplexer {
     ) -> Result<()>
     where
         O: Fn(Endpoint) -> F,
-        F: Future<Output = Result<Box<dyn Stream>>> + Send + Unpin,
+        F: Future<Output = OpenStreamResult> + Send + Unpin,
     {
         match message {
             Message::Request(r) => self.dispatch_request(r, open_stream).await,
@@ -268,8 +270,17 @@ impl Multiplexer {
                 channel_id,
                 message,
             } => (channel_id, Err(message)),
-            crate::proto::Response::New { channel_id } => (channel_id, Ok(())),
-            crate::proto::Response::Close { channel_id } => (channel_id, Ok(())),
+            crate::proto::Response::New {
+                channel_id,
+                endpoint,
+            } => (
+                channel_id,
+                Ok(Response::New {
+                    channel_id,
+                    endpoint,
+                }),
+            ),
+            crate::proto::Response::Close { channel_id } => (channel_id, Ok(response)),
         };
         let maybe_tx = {
             let mut queue = self.queue.lock()?;
@@ -303,7 +314,7 @@ impl Multiplexer {
     ) -> Result<()>
     where
         O: Fn(Endpoint) -> F,
-        F: Future<Output = Result<Box<dyn Stream>>> + Send + Unpin,
+        F: Future<Output = OpenStreamResult> + Send + Unpin,
     {
         match request {
             crate::proto::Request::New {
@@ -311,10 +322,13 @@ impl Multiplexer {
                 endpoint,
             } => {
                 tracing::info!("Channel {} associated with {}", channel_id, &endpoint);
-                let stream = open_stream(endpoint).await?;
+                let (stream, peer_endpoint) = open_stream(endpoint.clone()).await?;
                 let mut channel = self.create_channel_with_id(channel_id, stream)?;
-                self.send(crate::proto::Response::New { channel_id })
-                    .await?;
+                self.send(crate::proto::Response::New {
+                    channel_id,
+                    endpoint: peer_endpoint.unwrap_or(endpoint),
+                })
+                .await?;
                 tokio::spawn(async move {
                     if let Err(e) = channel.pipe().await {
                         tracing::error!(
@@ -349,7 +363,7 @@ impl Multiplexer {
     pub async fn request_close(
         self: Arc<Self>,
         channel_id: ChannelId,
-    ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
+    ) -> Result<oneshot::Receiver<std::result::Result<Response, String>>> {
         let req = crate::proto::Request::Close { channel_id };
         self.request(req).await
     }
@@ -358,7 +372,7 @@ impl Multiplexer {
         self: Arc<Self>,
         channel_id: ChannelId,
         endpoint: Endpoint,
-    ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
+    ) -> Result<oneshot::Receiver<std::result::Result<Response, String>>> {
         let req = crate::proto::Request::New {
             channel_id,
             endpoint,
@@ -369,7 +383,7 @@ impl Multiplexer {
     async fn request(
         self: Arc<Self>,
         request: crate::proto::Request,
-    ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
+    ) -> Result<oneshot::Receiver<std::result::Result<Response, String>>> {
         let channel_id = match request {
             crate::proto::Request::New { channel_id, .. } => channel_id,
             crate::proto::Request::Close { channel_id } => channel_id,

@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::ChannelId;
 
+use super::endpoint::Endpoint;
 use super::{decode_string, encode_string, Wire};
 
 use nom::branch::alt;
@@ -14,7 +15,10 @@ use nom::sequence::{preceded, tuple};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     /// Channel `channel_id` was successfully opened
-    New { channel_id: ChannelId },
+    New {
+        channel_id: ChannelId,
+        endpoint: Endpoint,
+    },
     /// Channel `channel_id` was successfully closed
     Close { channel_id: ChannelId },
     /// An error occured with channel `channel_id`
@@ -31,9 +35,13 @@ const RESPONSE_TYPE_ERROR: u8 = 3;
 impl Wire for Response {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         match self {
-            Self::New { channel_id } => {
+            Self::New {
+                channel_id,
+                endpoint,
+            } => {
                 buffer.push(RESPONSE_TYPE_NEW);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
+                endpoint.encode_into(buffer);
             }
             Self::Close { channel_id } => {
                 buffer.push(RESPONSE_TYPE_CLOSE);
@@ -59,7 +67,13 @@ impl Wire for Response {
             alt((
                 preceded(
                     verify(be_u8, |b| *b == RESPONSE_TYPE_NEW),
-                    map(be_u64, |channel_id| Self::New { channel_id }),
+                    map(
+                        tuple((be_u64, Endpoint::decode)),
+                        |(channel_id, endpoint)| Self::New {
+                            channel_id,
+                            endpoint,
+                        },
+                    ),
                 ),
                 preceded(
                     verify(be_u8, |b| *b == RESPONSE_TYPE_CLOSE),
@@ -82,7 +96,14 @@ impl Wire for Response {
 impl fmt::Display for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::New { channel_id } => write!(f, "Response::New {{ channel_id: {} }}", channel_id),
+            Self::New {
+                channel_id,
+                endpoint,
+            } => write!(
+                f,
+                "Response::New {{ channel_id: {}, endpoint: {} }}",
+                channel_id, endpoint
+            ),
             Self::Close { channel_id } => {
                 write!(f, "Response::Close {{ channel_id: {} }}", channel_id)
             }
