@@ -7,7 +7,9 @@ use super::response::Response;
 use super::Wire;
 
 use nom::branch::alt;
-use nom::bytes::streaming::{tag, take};
+#[cfg(debug_assertions)]
+use nom::bytes::streaming::tag;
+use nom::bytes::streaming::take;
 use nom::combinator::{map, verify};
 use nom::error::context;
 use nom::number::streaming::{be_u64, be_u8};
@@ -26,6 +28,7 @@ pub enum Message {
         buffer: Vec<u8>,
     },
 }
+#[cfg(debug_assertions)]
 const MESSAGE_TAG: &'static [u8; 8] = b"multiplx";
 const MESSAGE_TYPE_REQUEST: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
@@ -49,7 +52,11 @@ where
 
 impl Wire for Message {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(MESSAGE_TAG);
+        #[cfg(debug_assertions)]
+        {
+            buffer.extend_from_slice(MESSAGE_TAG);
+        }
+
         match self {
             Self::Request(ref request) => {
                 buffer.push(MESSAGE_TYPE_REQUEST);
@@ -74,31 +81,35 @@ impl Wire for Message {
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        context(
-            "Message",
+        let parse_message = alt((
             preceded(
-                tag(&MESSAGE_TAG[..]),
-                alt((
-                    preceded(
-                        verify(be_u8, |b| *b == MESSAGE_TYPE_REQUEST),
-                        map(Request::decode, |request| Self::Request(request)),
-                    ),
-                    preceded(
-                        verify(be_u8, |b| *b == MESSAGE_TYPE_RESPONSE),
-                        map(Response::decode, |response| Self::Response(response)),
-                    ),
-                    preceded(
-                        verify(be_u8, |b| *b == MESSAGE_TYPE_DATA),
-                        map(tuple((be_u64, decode_vec)), |(channel_id, data)| {
-                            Self::Data {
-                                channel_id,
-                                buffer: data,
-                            }
-                        }),
-                    ),
-                )),
+                verify(be_u8, |b| *b == MESSAGE_TYPE_REQUEST),
+                map(Request::decode, |request| Self::Request(request)),
             ),
-        )(buffer)
+            preceded(
+                verify(be_u8, |b| *b == MESSAGE_TYPE_RESPONSE),
+                map(Response::decode, |response| Self::Response(response)),
+            ),
+            preceded(
+                verify(be_u8, |b| *b == MESSAGE_TYPE_DATA),
+                map(tuple((be_u64, decode_vec)), |(channel_id, data)| {
+                    Self::Data {
+                        channel_id,
+                        buffer: data,
+                    }
+                }),
+            ),
+        ));
+
+        #[cfg(debug_assertions)]
+        {
+            context("Message", preceded(tag(&MESSAGE_TAG[..]), parse_message))(buffer)
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            context("Message", parse_message)(buffer)
+        }
     }
 }
 
