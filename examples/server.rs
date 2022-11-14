@@ -1,13 +1,13 @@
 use std::net::SocketAddr;
 
 use multiplex::{self, proto};
-use multiplex::{Error, Multiplexer, Result, Stdio, Stream};
+use multiplex::{Error, Multiplexer, OpenStreamResult, Result, Stdio, Stream};
 
-async fn open_stream(endpoint: proto::Endpoint) -> Result<Box<dyn Stream>> {
+async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult {
     match endpoint {
         proto::Endpoint::UnixSocket { path } => {
             let handle = tokio::net::UnixStream::connect(path).await?;
-            Ok(Box::new(handle) as Box<dyn Stream>)
+            Ok((Box::new(handle) as Box<dyn Stream>, None))
         }
         proto::Endpoint::TcpSocket { address, port } => {
             let addr: SocketAddr = match address {
@@ -25,7 +25,8 @@ async fn open_stream(endpoint: proto::Endpoint) -> Result<Box<dyn Stream>> {
                 }
             };
             let handle = tokio::net::TcpStream::connect(addr).await?;
-            Ok(Box::new(handle) as Box<dyn Stream>)
+            let endpoint = handle.peer_addr().ok().map(|addr| addr.into());
+            Ok((Box::new(handle) as Box<dyn Stream>, endpoint))
         }
     }
 }

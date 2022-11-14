@@ -8,7 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use clap::Parser;
 
 use multiplex::proto::{self, Wire};
-use multiplex::{ChannelId, Error, Multiplexer, Result, Stdio, Stream};
+use multiplex::{ChannelId, Error, Multiplexer, OpenStreamResult, Result, Stdio, Stream};
 
 mod socks;
 
@@ -104,7 +104,7 @@ async fn handshake(
     channel.pipe().await
 }
 
-async fn open_stream(_: proto::Endpoint) -> Result<Box<dyn Stream>> {
+async fn open_stream(_: proto::Endpoint) -> OpenStreamResult {
     Err(Error::IO(io::Error::new(
         io::ErrorKind::Unsupported,
         "No operation supported in client mode",
