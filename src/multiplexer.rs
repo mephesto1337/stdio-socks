@@ -193,7 +193,7 @@ impl Multiplexer {
                         },
                         Err(e) => {
                             tracing::error!("[{}] Received error from other end: {}", &self.name, &e);
-                            return Err(e.into());
+                            return Err(e);
                         }
                     }
                 },
@@ -233,7 +233,7 @@ impl Multiplexer {
             Message::Data { channel_id, buffer } => {
                 let tx = {
                     let channels = self.channels.read()?;
-                    if let Some(tx) = channels.get(&channel_id).map(|tx| tx.clone()) {
+                    if let Some(tx) = channels.get(&channel_id).cloned() {
                         tracing::trace!("[{}] Got TX for channel {}", &self.name, &channel_id);
                         Ok(tx)
                     } else {
@@ -351,7 +351,7 @@ impl Multiplexer {
                         .await?;
                 } else {
                     tracing::debug!("[{}] Closing unexisting channel {}", &self.name, channel_id);
-                    self.send((channel_id, format!("Unknown channel ID")))
+                    self.send((channel_id, format!("Unknown channel ID 0x{:x}", channel_id)))
                         .await?;
                 }
             }

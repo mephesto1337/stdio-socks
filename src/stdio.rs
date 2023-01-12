@@ -9,6 +9,12 @@ pub struct Stdio {
     stdout: tokio::io::Stdout,
 }
 
+impl Default for Stdio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Stdio {
     pub fn new() -> Self {
         Self {

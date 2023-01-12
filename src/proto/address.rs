@@ -95,15 +95,15 @@ impl Wire for Address {
             alt((
                 preceded(
                     verify(be_u8, |b| *b == ADDRESS_TYPE_IPV4),
-                    map(decode_ipv4, |ip4| Self::Ipv4(ip4)),
+                    map(decode_ipv4, Self::Ipv4),
                 ),
                 preceded(
                     verify(be_u8, |b| *b == ADDRESS_TYPE_IPV6),
-                    map(decode_ipv6, |ip6| Self::Ipv6(ip6)),
+                    map(decode_ipv6, Self::Ipv6),
                 ),
                 preceded(
                     verify(be_u8, |b| *b == ADDRESS_TYPE_NAME),
-                    map(super::decode_string, |s| Self::Name(s)),
+                    map(super::decode_string, Self::Name),
                 ),
             )),
         )(buffer)

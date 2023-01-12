@@ -29,7 +29,7 @@ pub enum Message {
     },
 }
 #[cfg(debug_assertions)]
-const MESSAGE_TAG: &'static [u8; 8] = b"multiplx";
+const MESSAGE_TAG: &[u8; 8] = b"multiplx";
 const MESSAGE_TYPE_REQUEST: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
 const MESSAGE_TYPE_DATA: u8 = 3;
@@ -84,11 +84,11 @@ impl Wire for Message {
         let parse_message = alt((
             preceded(
                 verify(be_u8, |b| *b == MESSAGE_TYPE_REQUEST),
-                map(Request::decode, |request| Self::Request(request)),
+                map(Request::decode, Self::Request),
             ),
             preceded(
                 verify(be_u8, |b| *b == MESSAGE_TYPE_RESPONSE),
-                map(Response::decode, |response| Self::Response(response)),
+                map(Response::decode, Self::Response),
             ),
             preceded(
                 verify(be_u8, |b| *b == MESSAGE_TYPE_DATA),

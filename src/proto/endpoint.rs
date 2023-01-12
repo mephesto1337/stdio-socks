@@ -23,11 +23,11 @@ impl From<SocketAddr> for Endpoint {
     fn from(s: SocketAddr) -> Self {
         match s {
             SocketAddr::V4(saddr4) => Self::TcpSocket {
-                address: saddr4.ip().clone().into(),
+                address: (*saddr4.ip()).into(),
                 port: saddr4.port(),
             },
             SocketAddr::V6(saddr6) => Self::TcpSocket {
-                address: saddr6.ip().clone().into(),
+                address: (*saddr6.ip()).into(),
                 port: saddr6.port(),
             },
         }
