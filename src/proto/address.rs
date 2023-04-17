@@ -1,14 +1,17 @@
-use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-use nom::branch::alt;
-use nom::bytes::streaming::take;
-use nom::combinator::{map, verify};
-use nom::error::context;
-use nom::number::streaming::be_u8;
-use nom::sequence::preceded;
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use crate::proto::Wire;
+use nom::{
+    branch::alt,
+    bytes::streaming::take,
+    combinator::{map, verify},
+    error::context,
+    number::streaming::be_u8,
+    sequence::preceded,
+};
 
 const ADDRESS_TYPE_IPV4: u8 = 1;
 const ADDRESS_TYPE_IPV6: u8 = 2;

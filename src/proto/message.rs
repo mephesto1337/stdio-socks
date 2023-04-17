@@ -2,18 +2,18 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::request::Request;
-use super::response::Response;
-use super::Wire;
+use super::{request::Request, response::Response, Wire};
 
-use nom::branch::alt;
 #[cfg(debug_assertions)]
 use nom::bytes::streaming::tag;
-use nom::bytes::streaming::take;
-use nom::combinator::{map, verify};
-use nom::error::context;
-use nom::number::streaming::{be_u64, be_u8};
-use nom::sequence::{preceded, tuple};
+
+use nom::{
+    branch::alt,
+    combinator::{map, verify},
+    error::context,
+    number::streaming::{be_u64, be_u8},
+    sequence::{preceded, tuple},
+};
 
 /// Messages that can be exchanged
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub enum Message {
     /// Data between 2 endpoints
     Data {
         channel_id: ChannelId,
-        buffer: Vec<u8>,
+        data: Vec<u8>,
     },
 }
 #[cfg(debug_assertions)]
@@ -33,22 +33,6 @@ const MESSAGE_TAG: &[u8; 8] = b"multiplx";
 const MESSAGE_TYPE_REQUEST: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
 const MESSAGE_TYPE_DATA: u8 = 3;
-
-fn encode_vec(buffer: &mut Vec<u8>, s: impl AsRef<[u8]>) {
-    let data = s.as_ref();
-    let size: u64 = data.len().try_into().expect("Buffer too long");
-    buffer.extend_from_slice(&size.to_be_bytes()[..]);
-    buffer.extend_from_slice(data);
-}
-
-fn decode_vec<'i, E>(input: &'i [u8]) -> nom::IResult<&'i [u8], Vec<u8>, E>
-where
-    E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
-{
-    let (rest, size) = be_u64(input)?;
-    let (rest, data) = take(size as usize)(rest)?;
-    Ok((rest, data.to_owned()))
-}
 
 impl Wire for Message {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
@@ -68,11 +52,11 @@ impl Wire for Message {
             }
             Self::Data {
                 channel_id,
-                buffer: ref data,
+                ref data,
             } => {
                 buffer.push(MESSAGE_TYPE_DATA);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
-                encode_vec(buffer, data);
+                data.encode_into(buffer);
             }
         }
     }
@@ -92,11 +76,8 @@ impl Wire for Message {
             ),
             preceded(
                 verify(be_u8, |b| *b == MESSAGE_TYPE_DATA),
-                map(tuple((be_u64, decode_vec)), |(channel_id, data)| {
-                    Self::Data {
-                        channel_id,
-                        buffer: data,
-                    }
+                map(tuple((be_u64, Vec::decode)), |(channel_id, data)| {
+                    Self::Data { channel_id, data }
                 }),
             ),
         ));
@@ -120,7 +101,7 @@ impl fmt::Display for Message {
             Self::Response(ref r) => fmt::Display::fmt(r, f),
             Self::Data {
                 channel_id,
-                ref buffer,
+                data: ref buffer,
             } => write!(
                 f,
                 "Data {{ channel_id: {}, buffer: {} bytes }}",

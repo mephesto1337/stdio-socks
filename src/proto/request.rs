@@ -2,14 +2,15 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::endpoint::Endpoint;
-use super::Wire;
+use super::{endpoint::Endpoint, Wire};
 
-use nom::branch::alt;
-use nom::combinator::{map, verify};
-use nom::error::context;
-use nom::number::streaming::{be_u64, be_u8};
-use nom::sequence::{preceded, tuple};
+use nom::{
+    branch::alt,
+    combinator::{map, verify},
+    error::context,
+    number::streaming::{be_u64, be_u8},
+    sequence::{preceded, tuple},
+};
 
 /// Requests that can be sent
 #[derive(Debug, Clone, PartialEq, Eq)]

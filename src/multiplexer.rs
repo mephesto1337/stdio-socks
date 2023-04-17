@@ -230,7 +230,7 @@ impl Multiplexer {
         match message {
             Message::Request(r) => self.dispatch_request(r, open_stream).await,
             Message::Response(r) => self.dispatch_response(r).await,
-            Message::Data { channel_id, buffer } => {
+            Message::Data { channel_id, data } => {
                 let tx = {
                     let channels = self.channels.read()?;
                     if let Some(tx) = channels.get(&channel_id).cloned() {
@@ -247,7 +247,7 @@ impl Multiplexer {
                     }
                 };
                 match tx {
-                    Ok(tx) => tx.send(buffer).await?,
+                    Ok(tx) => tx.send(data).await?,
                     Err(e) => self.send(e).await?,
                 }
                 Ok(())

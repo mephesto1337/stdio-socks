@@ -1,14 +1,14 @@
-use std::fmt;
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 use super::{address::Address, Wire};
 
-use nom::branch::alt;
-use nom::combinator::{map, verify};
-use nom::error::context;
-use nom::multi::length_data;
-use nom::number::streaming::{be_u16, be_u32, be_u8};
-use nom::sequence::{preceded, tuple};
+use nom::{
+    branch::alt,
+    combinator::{map, verify},
+    error::context,
+    number::streaming::{be_u16, be_u8},
+    sequence::{preceded, tuple},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct EmptyCustom;
@@ -105,24 +105,6 @@ impl Wire for EmptyCustom {
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
         Ok((buffer, Self))
-    }
-}
-
-impl Wire for Vec<u8> {
-    fn encode_into(&self, buffer: &mut Vec<u8>) {
-        let size: u32 = self
-            .len()
-            .try_into()
-            .expect("Vec's length does not fit into u32");
-        buffer.extend_from_slice(&size.to_be_bytes()[..]);
-        buffer.extend_from_slice(&self[..]);
-    }
-
-    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
-    where
-        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
-    {
-        context("Vec", map(length_data(be_u32), |data: &[u8]| data.to_vec()))(buffer)
     }
 }
 
