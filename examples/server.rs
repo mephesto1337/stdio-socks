@@ -28,6 +28,10 @@ async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult {
             let endpoint = handle.peer_addr().ok().map(|addr| addr.into());
             Ok((Box::new(handle) as Box<dyn Stream>, endpoint))
         }
+        proto::Endpoint::Custom { .. } => Err(Error::IO(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "No custom endpoint defined",
+        ))),
     }
 }
 
