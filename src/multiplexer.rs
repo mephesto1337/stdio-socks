@@ -252,7 +252,16 @@ where
                 };
                 match tx {
                     Ok(tx) => tx.send(data).await?,
-                    Err(e) => self.send(e).await?,
+                    Err(e) => {
+                        if let Err(e) = self.send(e).await {
+                            tracing::warn!("Tried to write into closed channel {channel_id}: {e}");
+                            // Channel is closed, close it
+                            {
+                                let mut channels = self.channels.write()?;
+                                channels.remove(&channel_id);
+                            }
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -326,23 +335,33 @@ where
                 endpoint,
             } => {
                 tracing::info!("Channel {} associated with {}", channel_id, &endpoint);
-                let (stream, peer_endpoint) = open_stream(endpoint.clone()).await?;
-                let mut channel = self.create_channel_with_id(channel_id, stream)?;
-                self.send(crate::proto::Response::New {
-                    channel_id,
-                    endpoint: peer_endpoint.unwrap_or(endpoint),
-                })
-                .await?;
-                tokio::spawn(async move {
-                    if let Err(e) = channel.pipe().await {
-                        tracing::error!(
-                            "[{}] Error wich channel {}: {}",
-                            &self.name,
+                match open_stream(endpoint.clone()).await {
+                    Ok((stream, peer_endpoint)) => {
+                        let mut channel = self.create_channel_with_id(channel_id, stream)?;
+                        self.send(crate::proto::Response::New {
                             channel_id,
-                            e
-                        );
+                            endpoint: peer_endpoint.unwrap_or(endpoint),
+                        })
+                        .await?;
+                        tokio::spawn(async move {
+                            if let Err(e) = channel.pipe().await {
+                                tracing::error!(
+                                    "[{}] Error wich channel {}: {}",
+                                    &self.name,
+                                    channel_id,
+                                    e
+                                );
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        self.send(crate::proto::Response::Error {
+                            channel_id,
+                            message: format!("{e}"),
+                        })
+                        .await?;
+                    }
+                }
             }
             crate::proto::Request::Close { channel_id } => {
                 let maybe_tx = {
