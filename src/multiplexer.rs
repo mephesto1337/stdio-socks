@@ -251,17 +251,17 @@ where
                     }
                 };
                 match tx {
-                    Ok(tx) => tx.send(data).await?,
-                    Err(e) => {
-                        if let Err(e) = self.send(e).await {
-                            tracing::warn!("Tried to write into closed channel {channel_id}: {e}");
+                    Ok(tx) => {
+                        if let Err(e) = tx.send(data).await {
                             // Channel is closed, close it
+                            tracing::warn!("Tried to write into closed channel {channel_id}: {e}");
                             {
                                 let mut channels = self.channels.write()?;
                                 channels.remove(&channel_id);
                             }
                         }
                     }
+                    Err(e) => self.send(e).await?,
                 }
                 Ok(())
             }
