@@ -21,7 +21,7 @@ pub enum Message<C = EmptyCustom> {
     /// A request message
     Request(Request<C>),
     /// A response message
-    Response(Response),
+    Response(Response<C>),
     /// Data between 2 endpoints
     Data {
         channel_id: ChannelId,

@@ -70,13 +70,13 @@ mod request;
 mod response;
 
 pub use address::Address;
-pub use endpoint::Endpoint;
+pub use endpoint::{EmptyCustom, Endpoint};
 pub use message::Message;
 pub use request::Request;
 pub use response::Response;
 
-impl From<Response> for Message {
-    fn from(r: Response) -> Self {
+impl<C> From<Response<C>> for Message<C> {
+    fn from(r: Response<C>) -> Self {
         Self::Response(r)
     }
 }

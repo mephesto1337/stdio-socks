@@ -2,7 +2,10 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::{endpoint::Endpoint, Wire};
+use super::{
+    endpoint::{EmptyCustom, Endpoint},
+    Wire,
+};
 
 use nom::{
     branch::alt,
@@ -14,11 +17,11 @@ use nom::{
 
 /// Responses to requests
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Response {
+pub enum Response<C = EmptyCustom> {
     /// Channel `channel_id` was successfully opened
     New {
         channel_id: ChannelId,
-        endpoint: Endpoint,
+        endpoint: Endpoint<C>,
     },
     /// Channel `channel_id` was successfully closed
     Close { channel_id: ChannelId },
@@ -33,7 +36,10 @@ const RESPONSE_TYPE_NEW: u8 = 1;
 const RESPONSE_TYPE_CLOSE: u8 = 2;
 const RESPONSE_TYPE_ERROR: u8 = 3;
 
-impl Wire for Response {
+impl<C> Wire for Response<C>
+where
+    C: Wire,
+{
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         match self {
             Self::New {
@@ -94,7 +100,10 @@ impl Wire for Response {
     }
 }
 
-impl fmt::Display for Response {
+impl<C> fmt::Display for Response<C>
+where
+    C: fmt::Display,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::New {
