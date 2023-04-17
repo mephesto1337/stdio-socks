@@ -2,8 +2,7 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::endpoint::Endpoint;
-use super::{decode_string, encode_string, Wire};
+use super::{endpoint::Endpoint, Wire};
 
 use nom::branch::alt;
 use nom::combinator::{map, verify};
@@ -53,7 +52,7 @@ impl Wire for Response {
             } => {
                 buffer.push(RESPONSE_TYPE_ERROR);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
-                encode_string(buffer, message);
+                message.encode_into(buffer)
             }
         }
     }
@@ -81,7 +80,7 @@ impl Wire for Response {
                 ),
                 preceded(
                     verify(be_u8, |b| *b == RESPONSE_TYPE_ERROR),
-                    map(tuple((be_u64, decode_string)), |(channel_id, message)| {
+                    map(tuple((be_u64, String::decode)), |(channel_id, message)| {
                         Self::Error {
                             channel_id,
                             message,

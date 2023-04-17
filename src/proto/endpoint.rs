@@ -1,8 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 
-use super::address::Address;
-use super::{decode_string, encode_string, Wire};
+use super::{address::Address, Wire};
 
 use nom::branch::alt;
 use nom::combinator::{map, verify};
@@ -58,7 +57,7 @@ where
         match self {
             Self::UnixSocket { ref path } => {
                 buffer.push(ENDPOINT_TYPE_UNIX);
-                encode_string(buffer, path);
+                path.encode_into(buffer)
             }
             Self::TcpSocket { ref address, port } => {
                 buffer.push(ENDPOINT_TYPE_TCP);
@@ -81,7 +80,7 @@ where
             alt((
                 preceded(
                     verify(be_u8, |b| *b == ENDPOINT_TYPE_UNIX),
-                    map(decode_string, |path| Self::UnixSocket { path }),
+                    map(String::decode, |path| Self::UnixSocket { path }),
                 ),
                 preceded(
                     verify(be_u8, |b| *b == ENDPOINT_TYPE_TCP),

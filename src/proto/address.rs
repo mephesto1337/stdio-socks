@@ -81,7 +81,7 @@ impl Wire for Address {
             }
             Self::Name(ref name) => {
                 buffer.push(ADDRESS_TYPE_NAME);
-                super::encode_string(buffer, name);
+                name.encode_into(buffer)
             }
         }
     }
@@ -103,7 +103,7 @@ impl Wire for Address {
                 ),
                 preceded(
                     verify(be_u8, |b| *b == ADDRESS_TYPE_NAME),
-                    map(super::decode_string, Self::Name),
+                    map(String::decode, Self::Name),
                 ),
             )),
         )(buffer)
