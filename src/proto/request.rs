@@ -2,7 +2,10 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::{endpoint::Endpoint, Wire};
+use super::{
+    endpoint::{EmptyCustom, Endpoint},
+    Wire,
+};
 
 use nom::{
     branch::alt,
@@ -14,11 +17,11 @@ use nom::{
 
 /// Requests that can be sent
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request {
+pub enum Request<C = EmptyCustom> {
     /// Request a channel opening
     New {
         channel_id: ChannelId,
-        endpoint: Endpoint,
+        endpoint: Endpoint<C>,
     },
     /// Close the following channel
     Close { channel_id: ChannelId },
@@ -27,7 +30,10 @@ pub enum Request {
 const REQUEST_TYPE_NEW: u8 = 1;
 const REQUEST_TYPE_CLOSE: u8 = 2;
 
-impl Wire for Request {
+impl<C> Wire for Request<C>
+where
+    C: Wire,
+{
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         match self {
             Self::New {
@@ -71,7 +77,10 @@ impl Wire for Request {
     }
 }
 
-impl fmt::Display for Request {
+impl<C> fmt::Display for Request<C>
+where
+    C: fmt::Display,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::New {

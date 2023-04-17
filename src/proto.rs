@@ -81,20 +81,20 @@ impl From<Response> for Message {
     }
 }
 
-impl From<Request> for Message {
-    fn from(r: Request) -> Self {
+impl<C> From<Request<C>> for Message<C> {
+    fn from(r: Request<C>) -> Self {
         Self::Request(r)
     }
 }
 
-impl From<(ChannelId, Vec<u8>)> for Message {
+impl<C> From<(ChannelId, Vec<u8>)> for Message<C> {
     fn from(r: (ChannelId, Vec<u8>)) -> Self {
         let (channel_id, data) = r;
         Self::Data { channel_id, data }
     }
 }
 
-impl From<(ChannelId, String)> for Message {
+impl<C> From<(ChannelId, String)> for Message<C> {
     fn from(r: (ChannelId, String)) -> Self {
         let (channel_id, message) = r;
         Self::Response(Response::Error {

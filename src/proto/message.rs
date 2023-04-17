@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::{request::Request, response::Response, Wire};
+use super::{endpoint::EmptyCustom, request::Request, response::Response, Wire};
 
 #[cfg(debug_assertions)]
 use nom::bytes::streaming::tag;
@@ -17,9 +17,9 @@ use nom::{
 
 /// Messages that can be exchanged
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message {
+pub enum Message<C = EmptyCustom> {
     /// A request message
-    Request(Request),
+    Request(Request<C>),
     /// A response message
     Response(Response),
     /// Data between 2 endpoints
@@ -34,7 +34,10 @@ const MESSAGE_TYPE_REQUEST: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
 const MESSAGE_TYPE_DATA: u8 = 3;
 
-impl Wire for Message {
+impl<C> Wire for Message<C>
+where
+    C: Wire,
+{
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         #[cfg(debug_assertions)]
         {
@@ -94,7 +97,10 @@ impl Wire for Message {
     }
 }
 
-impl fmt::Display for Message {
+impl<C> fmt::Display for Message<C>
+where
+    C: fmt::Display,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Request(ref r) => fmt::Display::fmt(r, f),

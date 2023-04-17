@@ -30,7 +30,7 @@ pub enum Endpoint<C = EmptyCustom> {
     Custom(C),
 }
 
-impl From<SocketAddr> for Endpoint {
+impl<C> From<SocketAddr> for Endpoint<C> {
     fn from(s: SocketAddr) -> Self {
         match s {
             SocketAddr::V4(saddr4) => Self::TcpSocket {
