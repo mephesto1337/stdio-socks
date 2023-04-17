@@ -98,13 +98,15 @@ where
 }
 
 impl Wire for EmptyCustom {
-    fn encode_into(&self, _buffer: &mut Vec<u8>) {}
+    fn encode_into(&self, _buffer: &mut Vec<u8>) {
+        unreachable!("EmptyCustom should not be serialized");
+    }
 
-    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
+    fn decode<'i, E>(_buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        Ok((buffer, Self))
+        unreachable!("EmptyCustom should not be deserialized");
     }
 }
 
