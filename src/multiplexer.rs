@@ -286,6 +286,18 @@ where
             queue.remove(&channel_id)
         };
 
+        // Gor error on channel, if already present sends EOF into it
+        if result.is_err() {
+            let maybe_tx = {
+                let channels = self.channels.read()?;
+                channels.get(&channel_id).cloned()
+            };
+            if let Some(tx) = maybe_tx {
+                tracing::debug!("Sending EOF to channel {channel_id}");
+                tx.send(Vec::new()).await?;
+            }
+        }
+
         if let Some(tx) = maybe_tx {
             if let Err(e) = tx.send(result) {
                 tracing::error!("Could send back result on channel {channel_id}: {e:?}");
@@ -404,19 +416,28 @@ where
                 res = self.stream.read(&mut buffer[..]) => {
                     match res {
                         Ok(0) => {
-                            tracing::debug!("Stream has ended");
+                            tracing::debug!("Stream has ended, sending empty buffer to channel");
+                            // Sending EOF to remote side
+                            self.tx.send((self.id, Vec::new()).into()).await?;
+                            self.tx.send(Request::Close { channel_id: self.id }.into()).await?;
                             break;
                         },
                         Ok(n) => self.tx.send((self.id, buffer[..n].to_vec()).into()).await?,
                         Err(e) => {
-                            tracing::warn!("Got error while reading stream: {}", &e);
+                            tracing::warn!("Got error while reading stream: {e}");
                             return Err(e.into());
                         }
                     }
                 },
                 maybe_data = self.rx.recv() => {
                     match maybe_data {
-                        Some(data) => self.stream.write_all(&data[..]).await?,
+                        Some(data) => {
+                            tracing::debug!("Writing {n} bytes to channel {id} stream", n = data.len(), id = self.id);
+                            if data.is_empty() {
+                                break;
+                            }
+                            self.stream.write_all(&data[..]).await?;
+                        }
                         None => {
                             tracing::warn!("All tx have been dropped");
                             break;
