@@ -1,13 +1,19 @@
-use std::collections::HashMap;
-use std::future::Future;
-use std::sync::{Arc, Mutex, RwLock};
-use std::{fmt, io};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Mutex, RwLock},
+    {fmt, io},
+};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::{mpsc, oneshot},
+};
 
-use crate::proto::{EmptyCustom, Endpoint, Message, Response, Wire};
-use crate::{ChannelId, Result};
+use crate::{
+    proto::{EmptyCustom, Endpoint, Message, Request, Response, Wire},
+    ChannelId, Result,
+};
 
 /// Trait for AsyncRead + AsyncWrite objects
 pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin {}
