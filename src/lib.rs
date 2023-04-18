@@ -8,5 +8,8 @@ pub use error::{Error, Result};
 mod stdio;
 pub use stdio::Stdio;
 
+mod empty;
+pub use empty::DevNull;
+
 mod multiplexer;
 pub use multiplexer::{Channel, Multiplexer, OpenStreamResult, Stream};
