@@ -20,7 +20,7 @@ pub struct Multiplexer<C = EmptyCustom> {
     channels: RwLock<HashMap<ChannelId, mpsc::Sender<Vec<u8>>>>,
 
     /// A Sender to give to each worker
-    tx: mpsc::Sender<crate::proto::Message<C>>,
+    tx: mpsc::Sender<Message<C>>,
 
     /// Waiting responses
     queue: Mutex<HashMap<ChannelId, oneshot::Sender<std::result::Result<Response<C>, String>>>>,
