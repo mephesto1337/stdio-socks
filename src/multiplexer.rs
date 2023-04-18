@@ -38,7 +38,7 @@ pub struct Channel<C = EmptyCustom> {
     id: ChannelId,
 
     /// queue to send data to the endpoint through the multiplexer
-    tx: mpsc::Sender<crate::proto::Message<C>>,
+    tx: mpsc::Sender<Message<C>>,
 
     /// queue to receive message
     rx: mpsc::Receiver<Vec<u8>>,
@@ -150,7 +150,7 @@ where
         })
     }
 
-    pub fn create() -> (Arc<Self>, mpsc::Receiver<crate::proto::Message<C>>) {
+    pub fn create() -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
         let (tx, rx) = mpsc::channel(64usize);
         (
             Arc::new(Self {
@@ -327,7 +327,7 @@ where
                 match open_stream(endpoint.clone()).await {
                     Ok((stream, peer_endpoint)) => {
                         let mut channel = self.create_channel_with_id(channel_id, stream)?;
-                        self.send(crate::proto::Response::New {
+                        self.send(Response::New {
                             channel_id,
                             endpoint: peer_endpoint.unwrap_or(endpoint),
                         })
@@ -339,7 +339,7 @@ where
                         });
                     }
                     Err(e) => {
-                        self.send(crate::proto::Response::Error {
+                        self.send(Response::Error {
                             channel_id,
                             message: format!("{e}"),
                         })
@@ -370,7 +370,7 @@ where
         self: Arc<Self>,
         channel_id: ChannelId,
     ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
-        let req = crate::proto::Request::Close { channel_id };
+        let req = Request::Close { channel_id };
         self.request(req).await
     }
 
@@ -379,7 +379,7 @@ where
         channel_id: ChannelId,
         endpoint: Endpoint<C>,
     ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
-        let req = crate::proto::Request::New {
+        let req = Request::New {
             channel_id,
             endpoint,
         };
@@ -388,11 +388,11 @@ where
 
     async fn request(
         self: Arc<Self>,
-        request: crate::proto::Request<C>,
+        request: Request<C>,
     ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
         let channel_id = match request {
-            crate::proto::Request::New { channel_id, .. } => channel_id,
-            crate::proto::Request::Close { channel_id } => channel_id,
+            Request::New { channel_id, .. } => channel_id,
+            Request::Close { channel_id } => channel_id,
         };
         let (tx, rx) = oneshot::channel();
         self.send(request).await?;
