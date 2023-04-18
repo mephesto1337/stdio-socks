@@ -431,7 +431,7 @@ where
                 maybe_data = self.rx.recv() => {
                     match maybe_data {
                         Some(data) => {
-                            tracing::debug!("Writing {n} bytes to channel {id} stream", n = data.len(), id = self.id);
+                            tracing::trace!("Writing {n} bytes to channel {id} stream", n = data.len(), id = self.id);
                             if data.is_empty() {
                                 break;
                             }
