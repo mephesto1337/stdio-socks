@@ -30,9 +30,6 @@ pub struct Multiplexer<C = EmptyCustom> {
 
     /// Waiting responses
     queue: Mutex<HashMap<ChannelId, oneshot::Sender<std::result::Result<Response<C>, String>>>>,
-
-    /// Name of this multiplexer (mostly used to identify logs lines)
-    name: String,
 }
 
 /// A channel to interact with a single client
@@ -79,11 +76,7 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
     }
 }
 
-async fn recv_message<'i, S, C>(
-    name: &str,
-    stream: &mut S,
-    buffer: &mut Vec<u8>,
-) -> Result<Option<crate::proto::Message<C>>>
+async fn recv_message<'i, S, C>(stream: &mut S, buffer: &mut Vec<u8>) -> Result<Option<Message<C>>>
 where
     C: Wire + fmt::Display + fmt::Debug + Clone,
     S: AsyncRead + Send + Unpin,
@@ -91,12 +84,7 @@ where
     let start = buffer.len();
     buffer.reserve(4096);
     let size = stream.read_buf(buffer).await?;
-    tracing::trace!(
-        "[{}] Receive buffer size: {} (+{})",
-        name,
-        buffer.len(),
-        size
-    );
+    tracing::trace!("Receive buffer size: {len} (+{size})", len = buffer.len());
     if size == 0 {
         return Err(
             io::Error::new(io::ErrorKind::BrokenPipe, "Remote end has closed stream").into(),
@@ -107,8 +95,8 @@ where
         Ok((rest, msg)) => {
             let new_len = rest.len();
             let consumed_bytes = buffer.len() - rest.len();
-            tracing::trace!("Resizing buffer, shift of {}", consumed_bytes);
-            tracing::trace!("{:?} => {:?}", &buffer[..consumed_bytes], &msg);
+            tracing::trace!("Resizing buffer, shift of {consumed_bytes}");
+            tracing::trace!("{:?} => {msg:?}", &buffer[..consumed_bytes]);
             buffer_memmove(buffer, consumed_bytes);
             assert_eq!(buffer.len(), new_len);
             Ok(Some(msg))
@@ -117,19 +105,18 @@ where
             nom::Err::Incomplete(i) => {
                 match i {
                     nom::Needed::Unknown => {
-                        tracing::debug!("[{}] Decode error missing bytes", name);
+                        tracing::debug!("Decode error missing bytes");
                     }
                     nom::Needed::Size(s) => {
-                        tracing::debug!("[{}] Decode error missing {} bytes", name, s);
+                        tracing::debug!("Decode error missing {s} bytes");
                     }
                 }
                 Ok(None)
             }
             nom::Err::Error(e) => {
                 tracing::warn!(
-                    "[{}] Decode error (recoverable): {}",
-                    name,
-                    crate::error::nom_to_owned(nom::Err::Error(e))
+                    "Decode error (recoverable): {err}",
+                    err = crate::error::nom_to_owned(nom::Err::Error(e))
                 );
                 Ok(None)
             }
@@ -163,14 +150,13 @@ where
         })
     }
 
-    pub fn create(name: impl AsRef<str>) -> (Arc<Self>, mpsc::Receiver<crate::proto::Message<C>>) {
+    pub fn create() -> (Arc<Self>, mpsc::Receiver<crate::proto::Message<C>>) {
         let (tx, rx) = mpsc::channel(64usize);
         (
             Arc::new(Self {
                 channels: RwLock::new(HashMap::new()),
                 tx,
                 queue: Mutex::new(HashMap::new()),
-                name: name.as_ref().to_owned(),
             }),
             rx,
         )
@@ -192,17 +178,17 @@ where
 
         loop {
             tokio::select! {
-                maybe_msg = recv_message(&self.name, &mut stream, &mut rx_buffer) => {
+                maybe_msg = recv_message(&mut stream, &mut rx_buffer) => {
                     match maybe_msg {
                         Ok(msg) => {
                             if let Some(msg) = msg {
-                                tracing::trace!("[{}] Received message from stream: {}", &self.name, &msg);
+                                tracing::trace!("Received message from stream: {msg}");
                                 let me = Arc::clone(&self);
                                 me.dispatch_message(msg, open_stream).await?;
                             }
                         },
                         Err(e) => {
-                            tracing::error!("[{}] Received error from other end: {}", &self.name, &e);
+                            tracing::error!("Received error from other end: {e}");
                             return Err(e);
                         }
                     }
@@ -210,14 +196,14 @@ where
                 maybe_msg = rx.recv() => {
                     match maybe_msg {
                         Some(msg) => {
-                            tracing::trace!("[{}] Sending  message to   stream: {}", &self.name, &msg);
                             tx_buffer.clear();
                             msg.encode_into(&mut tx_buffer);
                             stream.write_all(&tx_buffer[..]).await?;
+                            tracing::trace!("Sending  message to   stream: {msg} ({n} bytes)", n = tx_buffer.len());
                             stream.flush().await?;
                         },
                         None => {
-                            tracing::info!("[{}] No more message to be received", &self.name);
+                            tracing::info!("No more message to be received");
                             break;
                         }
                     }
@@ -244,16 +230,12 @@ where
                 let tx = {
                     let channels = self.channels.read()?;
                     if let Some(tx) = channels.get(&channel_id).cloned() {
-                        tracing::trace!("[{}] Got TX for channel {}", &self.name, &channel_id);
+                        tracing::trace!("Got TX for channel {channel_id}");
                         Ok(tx)
                     } else {
-                        tracing::warn!(
-                            "[{}] Tried to write into a closed channel ({})",
-                            &self.name,
-                            channel_id
-                        );
+                        tracing::warn!("Tried to write into a closed channel ({channel_id})");
 
-                        Err((channel_id, format!("Channel {} is closed", channel_id)))
+                        Err((channel_id, format!("Channel {channel_id} is closed")))
                     }
                 };
                 match tx {
@@ -261,10 +243,8 @@ where
                         if let Err(e) = tx.send(data).await {
                             // Channel is closed, close it
                             tracing::warn!("Tried to write into closed channel {channel_id}: {e}");
-                            {
-                                let mut channels = self.channels.write()?;
-                                channels.remove(&channel_id);
-                            }
+                            let mut channels = self.channels.write()?;
+                            channels.remove(&channel_id);
                         }
                     }
                     Err(e) => self.send(e).await?,
@@ -276,7 +256,7 @@ where
 
     pub async fn send(&self, msg: impl Into<crate::proto::Message<C>>) -> Result<()> {
         if let Err(e) = self.tx.send(msg.into()).await {
-            tracing::error!("[{}] Could not send {:?} to remote", &self.name, e);
+            tracing::error!("Could not send {e:?} to remote");
             Err(e.into())
         } else {
             Ok(())
@@ -285,11 +265,11 @@ where
 
     async fn dispatch_response(self: Arc<Self>, response: crate::proto::Response<C>) -> Result<()> {
         let (channel_id, result) = match response {
-            crate::proto::Response::Error {
+            Response::Error {
                 channel_id,
                 message,
             } => (channel_id, Err(message)),
-            crate::proto::Response::New {
+            Response::New {
                 channel_id,
                 endpoint,
             } => (
@@ -308,19 +288,10 @@ where
 
         if let Some(tx) = maybe_tx {
             if let Err(e) = tx.send(result) {
-                tracing::error!(
-                    "[{}] Could send back result on channel {}: {:?}",
-                    &self.name,
-                    channel_id,
-                    e
-                );
+                tracing::error!("Could send back result on channel {channel_id}: {e:?}");
             }
         } else {
-            tracing::warn!(
-                "[{}] No handler for response on channel {}",
-                &self.name,
-                channel_id
-            );
+            tracing::warn!("No handler for response on channel {channel_id}");
         }
 
         Ok(())
@@ -340,7 +311,7 @@ where
                 channel_id,
                 endpoint,
             } => {
-                tracing::info!("Channel {} associated with {}", channel_id, &endpoint);
+                tracing::info!("Channel {channel_id} associated with {endpoint}");
                 match open_stream(endpoint.clone()).await {
                     Ok((stream, peer_endpoint)) => {
                         let mut channel = self.create_channel_with_id(channel_id, stream)?;
@@ -351,12 +322,7 @@ where
                         .await?;
                         tokio::spawn(async move {
                             if let Err(e) = channel.pipe().await {
-                                tracing::error!(
-                                    "[{}] Error wich channel {}: {}",
-                                    &self.name,
-                                    channel_id,
-                                    e
-                                );
+                                tracing::error!("Error wich channel {channel_id}: {e}");
                             }
                         });
                     }
@@ -375,12 +341,11 @@ where
                     channels.remove(&channel_id).map(|_| ())
                 };
                 if maybe_tx.is_some() {
-                    tracing::debug!("[{}] Closing channel {}", &self.name, channel_id);
-                    self.send(crate::proto::Response::Close { channel_id })
-                        .await?;
+                    tracing::debug!("Closing channel {channel_id}");
+                    self.send(Response::Close { channel_id }).await?;
                 } else {
-                    tracing::debug!("[{}] Closing unexisting channel {}", &self.name, channel_id);
-                    self.send((channel_id, format!("Unknown channel ID 0x{:x}", channel_id)))
+                    tracing::debug!("Closing unexisting channel {channel_id}");
+                    self.send((channel_id, format!("Unknown channel ID {channel_id}")))
                         .await?;
                 }
             }
@@ -467,7 +432,6 @@ where
 
 impl<C> Drop for Channel<C> {
     fn drop(&mut self) {
-        let prog = std::env::args().next().unwrap();
-        tracing::debug!("[{}] Dropping channel {}", prog, self.id);
+        tracing::debug!("Dropping channel {id}", id = self.id);
     }
 }
