@@ -165,7 +165,7 @@ where
     pub async fn serve<O, S, F>(
         self: Arc<Self>,
         mut stream: S,
-        mut rx: mpsc::Receiver<crate::proto::Message<C>>,
+        mut rx: mpsc::Receiver<Message<C>>,
         open_stream: &O,
     ) -> Result<()>
     where
@@ -254,7 +254,7 @@ where
         }
     }
 
-    pub async fn send(&self, msg: impl Into<crate::proto::Message<C>>) -> Result<()> {
+    pub async fn send(&self, msg: impl Into<Message<C>>) -> Result<()> {
         if let Err(e) = self.tx.send(msg.into()).await {
             tracing::error!("Could not send {e:?} to remote");
             Err(e.into())
@@ -263,7 +263,7 @@ where
         }
     }
 
-    async fn dispatch_response(self: Arc<Self>, response: crate::proto::Response<C>) -> Result<()> {
+    async fn dispatch_response(self: Arc<Self>, response: Response<C>) -> Result<()> {
         let (channel_id, result) = match response {
             Response::Error {
                 channel_id,
@@ -279,7 +279,7 @@ where
                     endpoint,
                 }),
             ),
-            crate::proto::Response::Close { channel_id } => (channel_id, Ok(response)),
+            Response::Close { channel_id } => (channel_id, Ok(response)),
         };
         let maybe_tx = {
             let mut queue = self.queue.lock()?;
@@ -299,7 +299,7 @@ where
 
     async fn dispatch_request<F, O>(
         self: Arc<Self>,
-        request: crate::proto::Request<C>,
+        request: Request<C>,
         open_stream: &O,
     ) -> Result<()>
     where
@@ -307,7 +307,7 @@ where
         F: Future<Output = OpenStreamResult<C>> + Send + Unpin,
     {
         match request {
-            crate::proto::Request::New {
+            Request::New {
                 channel_id,
                 endpoint,
             } => {
@@ -335,7 +335,7 @@ where
                     }
                 }
             }
-            crate::proto::Request::Close { channel_id } => {
+            Request::Close { channel_id } => {
                 let maybe_tx = {
                     let mut channels = self.channels.write()?;
                     channels.remove(&channel_id).map(|_| ())
