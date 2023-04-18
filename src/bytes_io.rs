@@ -13,6 +13,12 @@ pub struct BytesIO {
     offset: usize,
 }
 
+impl From<Vec<u8>> for BytesIO {
+    fn from(buffer: Vec<u8>) -> Self {
+        Self { buffer, offset: 0 }
+    }
+}
+
 impl BytesIO {
     pub fn new(data: impl AsRef<[u8]>) -> Self {
         Self {
