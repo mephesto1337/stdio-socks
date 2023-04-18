@@ -419,7 +419,6 @@ where
                             tracing::debug!("Stream has ended, sending empty buffer to channel");
                             // Sending EOF to remote side
                             self.tx.send((self.id, Vec::new()).into()).await?;
-                            self.tx.send(Request::Close { channel_id: self.id }.into()).await?;
                             break;
                         },
                         Ok(n) => self.tx.send((self.id, buffer[..n].to_vec()).into()).await?,
