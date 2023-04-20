@@ -19,6 +19,15 @@ impl From<Vec<u8>> for BytesIO {
     }
 }
 
+impl From<String> for BytesIO {
+    fn from(s: String) -> Self {
+        Self {
+            buffer: s.into_bytes(),
+            offset: 0,
+        }
+    }
+}
+
 impl BytesIO {
     pub fn new(data: impl AsRef<[u8]>) -> Self {
         Self {
