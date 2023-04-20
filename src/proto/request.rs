@@ -55,25 +55,31 @@ where
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        context(
-            "Request",
-            alt((
-                preceded(
-                    verify(be_u8, |b| *b == REQUEST_TYPE_NEW),
-                    map(
-                        tuple((be_u64, Endpoint::decode)),
-                        |(channel_id, endpoint)| Self::New {
-                            channel_id,
-                            endpoint,
-                        },
-                    ),
+        let (rest, request_type) = be_u8(buffer)?;
+
+        match request_type {
+            REQUEST_TYPE_NEW => context(
+                "Request::New",
+                map(
+                    tuple((be_u64, Endpoint::decode)),
+                    |(channel_id, endpoint)| Self::New {
+                        channel_id,
+                        endpoint,
+                    },
                 ),
-                preceded(
-                    verify(be_u8, |b| *b == REQUEST_TYPE_CLOSE),
-                    map(be_u64, |channel_id| Self::Close { channel_id }),
-                ),
-            )),
-        )(buffer)
+            )(rest),
+
+            REQUEST_TYPE_CLOSE => context(
+                "Request::Close",
+                map(be_u64, |channel_id| Self::Close { channel_id }),
+            )(rest),
+
+            _ => Err(nom::Err::Failure(E::add_context(
+                buffer,
+                "Invalid request type",
+                nom::error::make_error(buffer, nom::error::ErrorKind::NoneOf),
+            ))),
+        }
     }
 }
 

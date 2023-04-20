@@ -69,34 +69,41 @@ where
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        context(
-            "Response",
-            alt((
-                preceded(
-                    verify(be_u8, |b| *b == RESPONSE_TYPE_NEW),
-                    map(
-                        tuple((be_u64, Endpoint::decode)),
-                        |(channel_id, endpoint)| Self::New {
-                            channel_id,
-                            endpoint,
-                        },
-                    ),
+        let (rest, response_type) = be_u8(buffer)?;
+
+        match response_type {
+            RESPONSE_TYPE_NEW => context(
+                "Response::New",
+                map(
+                    tuple((be_u64, Endpoint::decode)),
+                    |(channel_id, endpoint)| Self::New {
+                        channel_id,
+                        endpoint,
+                    },
                 ),
-                preceded(
-                    verify(be_u8, |b| *b == RESPONSE_TYPE_CLOSE),
-                    map(be_u64, |channel_id| Self::Close { channel_id }),
-                ),
-                preceded(
-                    verify(be_u8, |b| *b == RESPONSE_TYPE_ERROR),
-                    map(tuple((be_u64, String::decode)), |(channel_id, message)| {
-                        Self::Error {
-                            channel_id,
-                            message,
-                        }
-                    }),
-                ),
-            )),
-        )(buffer)
+            )(rest),
+
+            RESPONSE_TYPE_CLOSE => context(
+                "Response::Close",
+                map(be_u64, |channel_id| Self::Close { channel_id }),
+            )(rest),
+
+            RESPONSE_TYPE_ERROR => context(
+                "Response::Error",
+                map(tuple((be_u64, String::decode)), |(channel_id, message)| {
+                    Self::Error {
+                        channel_id,
+                        message,
+                    }
+                }),
+            )(rest),
+
+            _ => Err(nom::Err::Failure(E::add_context(
+                buffer,
+                "Invalid response type",
+                nom::error::make_error(buffer, nom::error::ErrorKind::NoneOf),
+            ))),
+        }
     }
 }
 

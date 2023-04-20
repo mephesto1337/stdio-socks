@@ -93,23 +93,19 @@ impl Wire for Address {
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        context(
-            "Address",
-            alt((
-                preceded(
-                    verify(be_u8, |b| *b == ADDRESS_TYPE_IPV4),
-                    map(decode_ipv4, Self::Ipv4),
-                ),
-                preceded(
-                    verify(be_u8, |b| *b == ADDRESS_TYPE_IPV6),
-                    map(decode_ipv6, Self::Ipv6),
-                ),
-                preceded(
-                    verify(be_u8, |b| *b == ADDRESS_TYPE_NAME),
-                    map(String::decode, Self::Name),
-                ),
-            )),
-        )(buffer)
+        let (rest, address_type) = be_u8(buffer)?;
+
+        match address_type {
+            ADDRESS_TYPE_IPV4 => context("Address::Ipv4", map(decode_ipv4, Self::Ipv4))(rest),
+            ADDRESS_TYPE_IPV6 => context("Address::Ipv6", map(decode_ipv6, Self::Ipv6))(rest),
+            ADDRESS_TYPE_NAME => context("Address::Name", map(String::decode, Self::Name))(rest),
+
+            _ => Err(nom::Err::Failure(E::add_context(
+                buffer,
+                "Invalid address type",
+                nom::error::make_error(buffer, nom::error::ErrorKind::NoneOf),
+            ))),
+        }
     }
 }
 

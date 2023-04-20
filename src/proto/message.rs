@@ -34,6 +34,27 @@ const MESSAGE_TYPE_REQUEST: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
 const MESSAGE_TYPE_DATA: u8 = 3;
 
+fn parse_message<'i, C, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Message<C>, E>
+where
+    E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
+    C: Wire,
+{
+    let (rest, message_type) = be_u8(buffer)?;
+
+    match message_type {
+        MESSAGE_TYPE_REQUEST => map(Request::<C>::decode, Message::Request)(rest),
+        MESSAGE_TYPE_RESPONSE => map(Response::<C>::decode, Message::Response)(rest),
+        MESSAGE_TYPE_DATA => map(tuple((be_u64, Vec::decode)), |(channel_id, data)| {
+            Message::Data { channel_id, data }
+        })(rest),
+        _ => Err(nom::Err::Failure(E::add_context(
+            buffer,
+            "Invalid message type",
+            nom::error::make_error(buffer, nom::error::ErrorKind::NoneOf),
+        ))),
+    }
+}
+
 impl<C> Wire for Message<C>
 where
     C: Wire,
@@ -68,23 +89,6 @@ where
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        let parse_message = alt((
-            preceded(
-                verify(be_u8, |b| *b == MESSAGE_TYPE_REQUEST),
-                map(Request::decode, Self::Request),
-            ),
-            preceded(
-                verify(be_u8, |b| *b == MESSAGE_TYPE_RESPONSE),
-                map(Response::decode, Self::Response),
-            ),
-            preceded(
-                verify(be_u8, |b| *b == MESSAGE_TYPE_DATA),
-                map(tuple((be_u64, Vec::decode)), |(channel_id, data)| {
-                    Self::Data { channel_id, data }
-                }),
-            ),
-        ));
-
         #[cfg(debug_assertions)]
         {
             context("Message", preceded(tag(&MESSAGE_TAG[..]), parse_message))(buffer)

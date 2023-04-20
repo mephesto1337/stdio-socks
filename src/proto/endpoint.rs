@@ -75,25 +75,29 @@ where
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        context(
-            "Endpoint",
-            alt((
-                preceded(
-                    verify(be_u8, |b| *b == ENDPOINT_TYPE_UNIX),
-                    map(String::decode, |path| Self::UnixSocket { path }),
-                ),
-                preceded(
-                    verify(be_u8, |b| *b == ENDPOINT_TYPE_TCP),
-                    map(tuple((Address::decode, be_u16)), |(address, port)| {
-                        Self::TcpSocket { address, port }
-                    }),
-                ),
-                preceded(
-                    verify(be_u8, |b| *b == ENDPOINT_TYPE_CUSTOM),
-                    map(C::decode, Self::Custom),
-                ),
-            )),
-        )(buffer)
+        let (rest, endpoint_type) = be_u8(buffer)?;
+
+        match endpoint_type {
+            ENDPOINT_TYPE_UNIX => context(
+                "Endpoint::UnixSocket",
+                map(String::decode, |path| Self::UnixSocket { path }),
+            )(rest),
+
+            ENDPOINT_TYPE_TCP => context(
+                "Endpoint::TcpSocket",
+                map(tuple((Address::decode, be_u16)), |(address, port)| {
+                    Self::TcpSocket { address, port }
+                }),
+            )(rest),
+
+            ENDPOINT_TYPE_CUSTOM => context("Endpoint::Custom", map(C::decode, Self::Custom))(rest),
+
+            _ => Err(nom::Err::Failure(E::add_context(
+                buffer,
+                "Invalid endpoint type",
+                nom::error::make_error(buffer, nom::error::ErrorKind::NoneOf),
+            ))),
+        }
     }
 }
 
