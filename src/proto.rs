@@ -22,6 +22,10 @@ pub trait Wire: Sized {
     fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>;
+
+    fn decode_verbose(buffer: &[u8]) -> nom::IResult<&[u8], Self, nom::error::VerboseError<&[u8]>> {
+        Self::decode(buffer)
+    }
 }
 
 impl Wire for String {

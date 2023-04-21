@@ -4,14 +4,7 @@ use std::{
 };
 
 use crate::proto::Wire;
-use nom::{
-    branch::alt,
-    bytes::streaming::take,
-    combinator::{map, verify},
-    error::context,
-    number::streaming::be_u8,
-    sequence::preceded,
-};
+use nom::{bytes::streaming::take, combinator::map, error::context, number::streaming::be_u8};
 
 const ADDRESS_TYPE_IPV4: u8 = 1;
 const ADDRESS_TYPE_IPV6: u8 = 2;

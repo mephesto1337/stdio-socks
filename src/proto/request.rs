@@ -8,11 +8,10 @@ use super::{
 };
 
 use nom::{
-    branch::alt,
-    combinator::{map, verify},
+    combinator::map,
     error::context,
     number::streaming::{be_u64, be_u8},
-    sequence::{preceded, tuple},
+    sequence::tuple,
 };
 
 /// Requests that can be sent

@@ -3,11 +3,10 @@ use std::{fmt, net::SocketAddr};
 use super::{address::Address, Wire};
 
 use nom::{
-    branch::alt,
-    combinator::{map, verify},
+    combinator::map,
     error::context,
     number::streaming::{be_u16, be_u8},
-    sequence::{preceded, tuple},
+    sequence::tuple,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]

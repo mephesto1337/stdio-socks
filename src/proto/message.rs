@@ -8,8 +8,7 @@ use super::{endpoint::EmptyCustom, request::Request, response::Response, Wire};
 use nom::bytes::streaming::tag;
 
 use nom::{
-    branch::alt,
-    combinator::{map, verify},
+    combinator::map,
     error::context,
     number::streaming::{be_u64, be_u8},
     sequence::{preceded, tuple},
