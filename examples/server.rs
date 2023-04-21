@@ -1,9 +1,8 @@
 use std::net::SocketAddr;
 
-use multiplex::{self, proto};
-use multiplex::{Error, Multiplexer, OpenStreamResult, Result, Stdio, Stream};
+use multiplex::{proto, Error, Multiplexer, OpenStreamResult, Result, Stdio, Stream};
 
-async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult {
+async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult<proto::EmptyCustom> {
     match endpoint {
         proto::Endpoint::UnixSocket { path } => {
             let handle = tokio::net::UnixStream::connect(path).await?;
@@ -43,7 +42,7 @@ async fn main() -> Result<()> {
         .init();
     tracing::info!("Server started");
     let stdio = Stdio::new();
-    let (mp, rx) = Multiplexer::create("server");
+    let (mp, rx) = Multiplexer::create();
 
     let my_open_stream = move |data| Box::pin(open_stream(data));
     if let Err(e) = mp.serve(stdio, rx, &my_open_stream).await {

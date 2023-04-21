@@ -15,7 +15,7 @@ mod socks;
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    #[clap(short, long, parse(try_from_str))]
+    #[arg(short, long)]
     bind_addr: std::net::SocketAddr,
 }
 
@@ -104,7 +104,7 @@ async fn handshake(
     channel.pipe().await
 }
 
-async fn open_stream(_: proto::Endpoint) -> OpenStreamResult {
+async fn open_stream<C>(_: proto::Endpoint) -> OpenStreamResult<C> {
     Err(Error::IO(io::Error::new(
         io::ErrorKind::Unsupported,
         "No operation supported in client mode",
@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind(&args.bind_addr).await?;
     let stdio = Stdio::new();
-    let (mp, rx) = Multiplexer::create("client");
+    let (mp, rx) = Multiplexer::create();
     let next_channel_id = AtomicU64::new(0);
 
     let mp_server = Arc::clone(&mp);
