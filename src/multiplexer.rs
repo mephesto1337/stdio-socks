@@ -20,6 +20,35 @@ use crate::{
 /// Trait for AsyncRead + AsyncWrite objects
 pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin {}
 
+#[derive(Debug)]
+pub struct Config {
+    #[cfg(feature = "heartbeat")]
+    /// Heartbeat to send if no data during `heartbeat` previous seconds
+    heartbeat: u64,
+
+    #[cfg(feature = "heartbeat")]
+    /// Current ping id being sent
+    ping_id: std::sync::atomic::AtomicU64,
+
+    /// Channel size to send data. The bigger means that if a channel is sending a lot of data,
+    /// then other channel may have to way `channel_size` message to send their own
+    channel_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "heartbeat")]
+            heartbeat: 4,
+
+            #[cfg(feature = "heartbeat")]
+            ping_id: std::sync::atomic::AtomicU64::new(0),
+
+            channel_size: 64,
+        }
+    }
+}
+
 impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Unpin {}
 
 /// Server part for the multiplexer
@@ -32,6 +61,9 @@ pub struct Multiplexer<C = EmptyCustom> {
 
     /// Waiting responses
     queue: Mutex<HashMap<ChannelId, oneshot::Sender<std::result::Result<Response<C>, String>>>>,
+
+    /// Configuration
+    config: Config,
 }
 
 /// A channel to interact with a single client
@@ -138,7 +170,7 @@ where
         id: ChannelId,
         output: Box<dyn Stream>,
     ) -> Result<Channel<C>> {
-        let (tx, rx) = mpsc::channel(64usize);
+        let (tx, rx) = mpsc::channel(self.config.channel_size);
         {
             let mut channels = self.channels.write()?;
             channels.insert(id, tx);
@@ -152,16 +184,22 @@ where
         })
     }
 
-    pub fn create() -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
-        let (tx, rx) = mpsc::channel(64usize);
+    pub fn create_with_config(config: Config) -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
+        let (tx, rx) = mpsc::channel(config.channel_size);
         (
             Arc::new(Self {
                 channels: RwLock::new(HashMap::new()),
                 tx,
                 queue: Mutex::new(HashMap::new()),
+                config,
             }),
             rx,
         )
+    }
+
+    pub fn create() -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
+        let config = Config::default();
+        Self::create_with_config(config)
     }
 
     pub async fn serve<O, S, F>(
@@ -179,7 +217,11 @@ where
         let mut tx_buffer = Vec::with_capacity(8192);
 
         loop {
-            let sleep = time::sleep(Duration::from_secs(3));
+            let sleep = if cfg!(feature = "heartbeat") {
+                time::sleep(Duration::from_secs(self.config.heartbeat))
+            } else {
+                time::sleep(Duration::from_secs(60))
+            };
             tokio::pin!(sleep);
 
             tokio::select! {
@@ -217,7 +259,7 @@ where
                     #[cfg(feature = "heartbeat")]
                     {
                         tx_buffer.clear();
-                        let msg = crate::proto::Message::<C>::Heartbeat;
+                        let msg = crate::proto::Message::<C>::Ping(self.config.ping_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                         msg.encode_into(&mut tx_buffer);
                         stream.write_all(&tx_buffer[..]).await?;
                         tracing::trace!("Sending  heartbeat to stream");
@@ -268,7 +310,18 @@ where
                 Ok(())
             }
             #[cfg(feature = "heartbeat")]
-            Message::Heartbeat => Ok(()),
+            Message::Ping(id) => self.send(Message::Pong(id)).await,
+            #[cfg(feature = "heartbeat")]
+            Message::Pong(id) => {
+                let current = self
+                    .config
+                    .ping_id
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if id >= current {
+                    tracing::warn!("Received a ping response from the future ?! (current={current}, received={id})");
+                }
+                Ok(())
+            }
         }
     }
 
