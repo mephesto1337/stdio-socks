@@ -2,12 +2,14 @@ use std::{
     collections::HashMap,
     future::Future,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
     {fmt, io},
 };
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, oneshot},
+    time,
 };
 
 use crate::{
@@ -177,6 +179,9 @@ where
         let mut tx_buffer = Vec::with_capacity(8192);
 
         loop {
+            let sleep = time::sleep(Duration::from_secs(3));
+            tokio::pin!(sleep);
+
             tokio::select! {
                 maybe_msg = recv_message(&mut stream, &mut rx_buffer) => {
                     match maybe_msg {
@@ -208,6 +213,17 @@ where
                         }
                     }
                 },
+                _ = &mut sleep => {
+                    #[cfg(feature = "heartbeat")]
+                    {
+                        tx_buffer.clear();
+                        let msg = crate::proto::Message::<C>::Heartbeat;
+                        msg.encode_into(&mut tx_buffer);
+                        stream.write_all(&tx_buffer[..]).await?;
+                        tracing::trace!("Sending  heartbeat to stream");
+                        stream.flush().await?;
+                    }
+                }
             }
         }
 
@@ -251,6 +267,8 @@ where
                 }
                 Ok(())
             }
+            #[cfg(feature = "heartbeat")]
+            Message::Heartbeat => Ok(()),
         }
     }
 

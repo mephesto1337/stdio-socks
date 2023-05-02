@@ -26,12 +26,17 @@ pub enum Message<C = EmptyCustom> {
         channel_id: ChannelId,
         data: Vec<u8>,
     },
+    #[cfg(feature = "heartbeat")]
+    /// Heartbeat to keep stream open
+    Heartbeat,
 }
 #[cfg(debug_assertions)]
 const MESSAGE_TAG: &[u8; 8] = b"multiplx";
 const MESSAGE_TYPE_REQUEST: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
 const MESSAGE_TYPE_DATA: u8 = 3;
+#[cfg(feature = "heartbeat")]
+const MESSAGE_TYPE_HEARTBEAT: u8 = 4;
 
 fn parse_message<'i, C, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Message<C>, E>
 where
@@ -46,6 +51,8 @@ where
         MESSAGE_TYPE_DATA => map(tuple((be_u64, Vec::decode)), |(channel_id, data)| {
             Message::Data { channel_id, data }
         })(rest),
+        #[cfg(feature = "heartbeat")]
+        MESSAGE_TYPE_HEARTBEAT => Ok((rest, Message::<C>::Heartbeat)),
         _ => Err(nom::Err::Failure(E::add_context(
             buffer,
             "Invalid message type",
@@ -80,6 +87,10 @@ where
                 buffer.push(MESSAGE_TYPE_DATA);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
                 data.encode_into(buffer);
+            }
+            #[cfg(feature = "heartbeat")]
+            Self::Heartbeat => {
+                buffer.push(MESSAGE_TYPE_HEARTBEAT);
             }
         }
     }
@@ -117,6 +128,8 @@ where
                 channel_id,
                 buffer.len()
             ),
+            #[cfg(feature = "heartbeat")]
+            Self::Heartbeat => f.write_str("heartbeat"),
         }
     }
 }
