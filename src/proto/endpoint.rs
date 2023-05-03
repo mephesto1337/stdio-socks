@@ -1,11 +1,12 @@
-use std::{fmt, net::SocketAddr};
+use std::{fmt, mem::size_of, net::SocketAddr};
 
 use super::{address::Address, Wire};
 
 use nom::{
     combinator::map,
     error::context,
-    number::streaming::{be_u16, be_u8},
+    multi::length_value,
+    number::streaming::{be_u16, be_u32, be_u8},
     sequence::tuple,
 };
 
@@ -65,7 +66,15 @@ where
             }
             Self::Custom(ref c) => {
                 buffer.push(ENDPOINT_TYPE_CUSTOM);
-                c.encode_into(buffer)
+                buffer.extend_from_slice(&0u32.to_be_bytes()[..]);
+                let old_len = buffer.len();
+                c.encode_into(buffer);
+                let new_len = buffer.len();
+                let custom_size: u32 = (new_len - old_len)
+                    .try_into()
+                    .expect("Got a 4GB+ custom payload");
+                buffer[old_len..][..size_of::<u32>()]
+                    .copy_from_slice(&custom_size.to_be_bytes()[..]);
             }
         }
     }
@@ -89,7 +98,10 @@ where
                 }),
             )(rest),
 
-            ENDPOINT_TYPE_CUSTOM => context("Endpoint::Custom", map(C::decode, Self::Custom))(rest),
+            ENDPOINT_TYPE_CUSTOM => context(
+                "Endpoint::Custom",
+                length_value(be_u32, map(C::decode, Self::Custom)),
+            )(rest),
 
             _ => Err(nom::Err::Failure(E::add_context(
                 buffer,
