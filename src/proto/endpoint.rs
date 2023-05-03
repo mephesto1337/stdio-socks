@@ -78,6 +78,7 @@ where
             }
             Self::Custom(ref c) => {
                 buffer.push(ENDPOINT_TYPE_CUSTOM);
+                let offset_to_size = buffer.len();
                 buffer.extend_from_slice(&0u32.to_be_bytes()[..]);
                 let old_len = buffer.len();
                 c.encode_into(buffer);
@@ -85,7 +86,7 @@ where
                 let custom_size: u32 = (new_len - old_len)
                     .try_into()
                     .expect("Got a 4GB+ custom payload");
-                buffer[old_len..][..size_of::<u32>()]
+                buffer[offset_to_size..][..size_of::<u32>()]
                     .copy_from_slice(&custom_size.to_be_bytes()[..]);
             }
         }
