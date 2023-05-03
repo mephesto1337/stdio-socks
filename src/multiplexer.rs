@@ -216,12 +216,18 @@ where
         let mut rx_buffer = Vec::with_capacity(8192);
         let mut tx_buffer = Vec::with_capacity(8192);
 
+        let sleep_duration;
+        #[cfg(feature = "heartbeat")]
+        {
+            sleep_duration = self.config.heartbeat;
+        }
+        #[cfg(not(feature = "heartbeat"))]
+        {
+            sleep_duration = 60;
+        }
+
         loop {
-            let sleep = if cfg!(feature = "heartbeat") {
-                time::sleep(Duration::from_secs(self.config.heartbeat))
-            } else {
-                time::sleep(Duration::from_secs(60))
-            };
+            let sleep = time::sleep(Duration::from_secs(sleep_duration));
             tokio::pin!(sleep);
 
             tokio::select! {
