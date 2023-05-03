@@ -2,7 +2,7 @@ use nom::{
     combinator::{map, map_opt},
     error::context,
     multi::length_data,
-    number::streaming::be_u32,
+    number::streaming::{be_u32, be_u8},
 };
 
 use crate::ChannelId;
@@ -67,6 +67,36 @@ impl Wire for Vec<u8> {
     }
 }
 
+impl<T> Wire for Option<T>
+where
+    T: Wire,
+{
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        if let Some(value) = self.as_ref() {
+            buffer.push(1);
+            value.encode_into(buffer);
+        } else {
+            buffer.push(0);
+        }
+    }
+
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
+    where
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
+    {
+        let (rest, has_value) = context("Optional value", be_u8)(buffer)?;
+        match has_value {
+            0 => Ok((rest, None)),
+            1 => map(T::decode, Some)(rest),
+            _ => Err(nom::Err::Failure(E::add_context(
+                buffer,
+                "Invalid value for optional",
+                nom::error::make_error(buffer, nom::error::ErrorKind::NoneOf),
+            ))),
+        }
+    }
+}
+
 mod address;
 mod endpoint;
 mod message;
@@ -74,7 +104,7 @@ mod request;
 mod response;
 
 pub use address::Address;
-pub use endpoint::{EmptyCustom, Endpoint};
+pub use endpoint::{Endpoint, RawCustom};
 pub use message::Message;
 pub use request::Request;
 pub use response::Response;

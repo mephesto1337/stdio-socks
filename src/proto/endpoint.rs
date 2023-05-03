@@ -1,4 +1,4 @@
-use std::{fmt, mem::size_of, net::SocketAddr};
+use std::{fmt, mem::size_of, net::SocketAddr, ops::Deref};
 
 use super::{address::Address, Wire};
 
@@ -10,18 +10,30 @@ use nom::{
     sequence::tuple,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub struct EmptyCustom;
+/// Dummy type to avoid unnecessary parsing of Custom endpints
+#[derive(Debug, Default)]
+pub struct RawCustom(Vec<u8>);
 
-impl fmt::Display for EmptyCustom {
+impl Deref for RawCustom {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl fmt::Display for RawCustom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("\u{2205}")
+        for b in &self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
     }
 }
 
 /// Different endpoints to connect to
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Endpoint<C = EmptyCustom> {
+pub enum Endpoint<C = RawCustom> {
     /// An UNIX socket (STREAM, not DGRAM)
     UnixSocket { path: String },
     /// A TCP endpoint
@@ -112,16 +124,16 @@ where
     }
 }
 
-impl Wire for EmptyCustom {
-    fn encode_into(&self, _buffer: &mut Vec<u8>) {
-        unreachable!("EmptyCustom should not be serialized");
+impl Wire for RawCustom {
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&self.0[..]);
     }
 
-    fn decode<'i, E>(_buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        unreachable!("EmptyCustom should not be deserialized");
+        Ok((&b""[..], Self(buffer.to_vec())))
     }
 }
 

@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use crate::{
-    proto::{EmptyCustom, Endpoint, Message, Request, Response, Wire},
+    proto::{Endpoint, Message, RawCustom, Request, Response, Wire},
     ChannelId, Result,
 };
 
@@ -52,7 +52,7 @@ impl Default for Config {
 impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Unpin {}
 
 /// Server part for the multiplexer
-pub struct Multiplexer<C = EmptyCustom> {
+pub struct Multiplexer<C = RawCustom> {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
     channels: RwLock<HashMap<ChannelId, mpsc::Sender<Vec<u8>>>>,
 
@@ -67,7 +67,7 @@ pub struct Multiplexer<C = EmptyCustom> {
 }
 
 /// A channel to interact with a single client
-pub struct Channel<C = EmptyCustom> {
+pub struct Channel<C = RawCustom> {
     /// It's identifier
     id: ChannelId,
 
@@ -112,7 +112,7 @@ fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
 
 async fn recv_message<'i, S, C>(stream: &mut S, buffer: &mut Vec<u8>) -> Result<Option<Message<C>>>
 where
-    C: Wire + fmt::Display + fmt::Debug + Clone,
+    C: Wire + fmt::Display + fmt::Debug,
     S: AsyncRead + Send + Unpin,
 {
     let start = buffer.len();
@@ -163,7 +163,7 @@ pub type OpenStreamResult<C> = Result<(Box<dyn Stream>, Option<Endpoint<C>>)>;
 
 impl<C> Multiplexer<C>
 where
-    C: Wire + fmt::Display + fmt::Debug + Clone + Send + 'static,
+    C: Wire + fmt::Display + fmt::Debug + Send + 'static,
 {
     pub fn create_channel_with_id(
         &self,
@@ -401,12 +401,12 @@ where
                 endpoint,
             } => {
                 tracing::info!("Channel {channel_id} associated with {endpoint}");
-                match open_stream(endpoint.clone()).await {
+                match open_stream(endpoint).await {
                     Ok((stream, peer_endpoint)) => {
                         let mut channel = self.create_channel_with_id(channel_id, stream)?;
                         self.send(Response::New {
                             channel_id,
-                            endpoint: peer_endpoint.unwrap_or(endpoint),
+                            endpoint: peer_endpoint,
                         })
                         .await?;
                         tokio::spawn(async move {

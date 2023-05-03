@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::{endpoint::EmptyCustom, request::Request, response::Response, Wire};
+use super::{endpoint::RawCustom, request::Request, response::Response, Wire};
 
 #[cfg(debug_assertions)]
 use nom::bytes::streaming::tag;
@@ -16,7 +16,7 @@ use nom::{
 
 /// Messages that can be exchanged
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message<C = EmptyCustom> {
+pub enum Message<C = RawCustom> {
     /// A request message
     Request(Request<C>),
     /// A response message

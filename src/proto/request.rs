@@ -3,7 +3,7 @@ use std::fmt;
 use crate::ChannelId;
 
 use super::{
-    endpoint::{EmptyCustom, Endpoint},
+    endpoint::{Endpoint, RawCustom},
     Wire,
 };
 
@@ -16,7 +16,7 @@ use nom::{
 
 /// Requests that can be sent
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request<C = EmptyCustom> {
+pub enum Request<C = RawCustom> {
     /// Request a channel opening
     New {
         channel_id: ChannelId,

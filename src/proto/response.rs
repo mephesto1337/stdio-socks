@@ -3,7 +3,7 @@ use std::fmt;
 use crate::ChannelId;
 
 use super::{
-    endpoint::{EmptyCustom, Endpoint},
+    endpoint::{Endpoint, RawCustom},
     Wire,
 };
 
@@ -16,11 +16,11 @@ use nom::{
 
 /// Responses to requests
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Response<C = EmptyCustom> {
+pub enum Response<C = RawCustom> {
     /// Channel `channel_id` was successfully opened
     New {
         channel_id: ChannelId,
-        endpoint: Endpoint<C>,
+        endpoint: Option<Endpoint<C>>,
     },
     /// Channel `channel_id` was successfully closed
     Close { channel_id: ChannelId },
@@ -47,7 +47,12 @@ where
             } => {
                 buffer.push(RESPONSE_TYPE_NEW);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
-                endpoint.encode_into(buffer);
+                if let Some(endpoint) = endpoint.as_ref() {
+                    buffer.push(1);
+                    endpoint.encode_into(buffer);
+                } else {
+                    buffer.push(0);
+                }
             }
             Self::Close { channel_id } => {
                 buffer.push(RESPONSE_TYPE_CLOSE);
@@ -74,7 +79,7 @@ where
             RESPONSE_TYPE_NEW => context(
                 "Response::New",
                 map(
-                    tuple((be_u64, Endpoint::decode)),
+                    tuple((be_u64, Option::<Endpoint<C>>::decode)),
                     |(channel_id, endpoint)| Self::New {
                         channel_id,
                         endpoint,
@@ -114,12 +119,16 @@ where
         match self {
             Self::New {
                 channel_id,
-                endpoint,
+                endpoint: Some(ep),
             } => write!(
                 f,
                 "Response::New {{ channel_id: {}, endpoint: {} }}",
-                channel_id, endpoint
+                channel_id, ep
             ),
+            Self::New {
+                channel_id,
+                endpoint: None,
+            } => write!(f, "Response::New {{ channel_id: {} }}", channel_id),
             Self::Close { channel_id } => {
                 write!(f, "Response::Close {{ channel_id: {} }}", channel_id)
             }

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use multiplex::{proto, Error, Multiplexer, OpenStreamResult, Result, Stdio, Stream};
 
-async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult<proto::EmptyCustom> {
+async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult<proto::RawCustom> {
     match endpoint {
         proto::Endpoint::UnixSocket { path } => {
             let handle = tokio::net::UnixStream::connect(path).await?;
