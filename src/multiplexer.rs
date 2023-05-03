@@ -135,27 +135,30 @@ where
             assert_eq!(buffer.len(), new_len);
             Ok(Some(msg))
         }
-        Err(e) => match e {
-            nom::Err::Incomplete(i) => {
-                match i {
-                    nom::Needed::Unknown => {
-                        tracing::debug!("Decode error missing bytes");
+        Err(e) => {
+            tracing::trace!("Buffer: {:?}", &buffer[..]);
+            match e {
+                nom::Err::Incomplete(i) => {
+                    match i {
+                        nom::Needed::Unknown => {
+                            tracing::debug!("Decode error missing bytes");
+                        }
+                        nom::Needed::Size(s) => {
+                            tracing::debug!("Decode error missing {s} bytes");
+                        }
                     }
-                    nom::Needed::Size(s) => {
-                        tracing::debug!("Decode error missing {s} bytes");
-                    }
+                    Ok(None)
                 }
-                Ok(None)
+                nom::Err::Error(e) => {
+                    tracing::warn!(
+                        "Decode error (recoverable): {err}",
+                        err = crate::error::nom_to_owned(nom::Err::Error(e))
+                    );
+                    Ok(None)
+                }
+                nom::Err::Failure(e) => Err(nom::Err::Failure(e).into()),
             }
-            nom::Err::Error(e) => {
-                tracing::warn!(
-                    "Decode error (recoverable): {err}",
-                    err = crate::error::nom_to_owned(nom::Err::Error(e))
-                );
-                Ok(None)
-            }
-            nom::Err::Failure(e) => Err(nom::Err::Failure(e).into()),
-        },
+        }
     }
 }
 
