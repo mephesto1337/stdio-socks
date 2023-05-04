@@ -13,7 +13,7 @@ use std::{
     pin::Pin,
     task::{ready, Context, Poll},
 };
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ChannelId;
 
@@ -153,9 +153,11 @@ impl<C> From<(ChannelId, String)> for Message<C> {
 #[pin_project]
 pub struct MessageStream<C, S> {
     #[pin]
-    inner: BufReader<S>,
-    buffer: Vec<u8>,
-    offset: usize,
+    inner: S,
+    tx_buffer: Vec<u8>,
+    tx_offset: usize,
+    rx_buffer: Vec<u8>,
+    rx_offset: usize,
     _type: PhantomData<C>,
 }
 
@@ -165,10 +167,54 @@ where
 {
     pub fn new(stream: S) -> Self {
         Self {
-            inner: BufReader::new(stream),
-            buffer: Vec::new(),
-            offset: 0,
+            inner: stream,
+            rx_buffer: Vec::new(),
+            tx_offset: 0,
+            tx_buffer: Vec::new(),
+            rx_offset: 0,
             _type: PhantomData,
+        }
+    }
+}
+
+enum MessageStreamResult<C> {
+    Ok(Message<C>),
+    Incomplete(nom::Needed),
+    Err(nom::error::VerboseError<Vec<u8>>),
+}
+
+impl<C, S> MessageStream<C, S>
+where
+    C: Wire,
+{
+    fn move_to_start(buffer: &mut Vec<u8>, offset: &mut usize) {
+        if *offset < 2048 {
+            return;
+        }
+
+        let destination = buffer.as_mut_ptr();
+        let size = buffer[*offset..].len();
+        let source = buffer[*offset..].as_ptr();
+        *offset = 0;
+
+        unsafe {
+            std::intrinsics::copy(source, destination, size);
+            buffer.set_len(size);
+        }
+    }
+
+    fn get_buffered_next(buffer: &mut Vec<u8>, offset: &mut usize) -> MessageStreamResult<C> {
+        match Message::<C>::decode_verbose(&buffer[*offset..]) {
+            Ok((rest, msg)) => {
+                *offset = buffer.offset(rest);
+                Self::move_to_start(buffer, offset);
+                MessageStreamResult::Ok(msg)
+            }
+            Err(ne) => match crate::error::nom_to_owned(ne) {
+                nom::Err::Incomplete(n) => MessageStreamResult::Incomplete(n),
+                nom::Err::Error(e) => MessageStreamResult::Err(e),
+                nom::Err::Failure(e) => MessageStreamResult::Err(e),
+            },
         }
     }
 }
@@ -182,37 +228,38 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut project = self.project();
-        let buffer = match ready!(project.inner.as_mut().poll_fill_buf(cx)) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!("Got error with underlying stream: {e}");
-                return Poll::Ready(None);
-            }
-        };
-
-        match Message::<C>::decode_verbose(buffer) {
-            Ok((rest, msg)) => {
-                let amt = buffer.offset(rest);
-                project.inner.consume(amt);
-                Poll::Ready(Some(msg))
-            }
-            Err(e) => match e {
-                nom::Err::Incomplete(n) => {
-                    match n {
-                        nom::Needed::Unknown => {
-                            tracing::trace!("Read is incomplete, some bytes missing")
+        loop {
+            match Self::get_buffered_next(project.rx_buffer, project.rx_offset) {
+                MessageStreamResult::Ok(m) => return Poll::Ready(Some(m)),
+                MessageStreamResult::Incomplete(n) => {
+                    project.rx_buffer.reserve(
+                        match n {
+                            nom::Needed::Unknown => 0,
+                            nom::Needed::Size(s) => s.get(),
                         }
-                        nom::Needed::Size(s) => {
-                            tracing::trace!("Read is incomplete, {s} bytes missing")
-                        }
+                        .max(1024),
+                    );
+                    let mut read_buf = ReadBuf::uninit(project.rx_buffer.spare_capacity_mut());
+                    if let Err(e) = ready!(project.inner.as_mut().poll_read(cx, &mut read_buf)) {
+                        tracing::error!("Got underlying IO error: {e}");
+                        return Poll::Ready(None);
                     }
-                    Poll::Pending
+                    let n = read_buf.initialized().len();
+                    if n == 0 {
+                        // EOF
+                        return Poll::Ready(None);
+                    } else {
+                        let new_len = project.rx_buffer.len() + n;
+                        unsafe { project.rx_buffer.set_len(new_len) };
+
+                        // next loop, rety to parse
+                    }
                 }
-                nom::Err::Error(e) | nom::Err::Failure(e) => {
-                    tracing::error!("Got parsing error with underlying stream: {e:?}");
-                    Poll::Ready(None)
+                MessageStreamResult::Err(e) => {
+                    tracing::error!("Got parsing error: {e:?}");
+                    return Poll::Ready(None);
                 }
-            },
+            }
         }
     }
 }
@@ -220,33 +267,30 @@ where
 impl<C, S> Sink<Message<C>> for MessageStream<C, S>
 where
     C: Wire,
-    S: AsyncRead + AsyncWrite,
+    S: AsyncWrite,
 {
     type Error = io::Error;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let mut project = self.project();
-        while *project.offset < project.buffer.len() {
-            let buf = &project.buffer[*project.offset..];
-            match ready!(project.inner.as_mut().get_pin_mut().poll_write(cx, buf)) {
+        loop {
+            let buf = &project.tx_buffer[*project.tx_offset..];
+            if buf.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            match ready!(project.inner.as_mut().poll_write(cx, buf)) {
                 Ok(n) => {
-                    *project.offset += n;
-                    if *project.offset == project.buffer.len() {
-                        return Poll::Ready(Ok(()));
-                    }
+                    *project.tx_offset += n;
                 }
                 Err(e) => return Poll::Ready(Err(e)),
             }
         }
-
-        Poll::Ready(Ok(()))
     }
 
     fn start_send(self: Pin<&mut Self>, item: Message<C>) -> Result<(), Self::Error> {
         let project = self.project();
-        project.buffer.clear();
-        *project.offset = 0;
-        item.encode_into(project.buffer);
+        project.tx_buffer.clear();
+        item.encode_into(project.tx_buffer);
         Ok(())
     }
 
