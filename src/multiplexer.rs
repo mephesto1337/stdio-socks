@@ -47,6 +47,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            // By default, nginx closes a websocket after 5 seconds of inactivity.
             #[cfg(feature = "heartbeat")]
             heartbeat: 4,
 
