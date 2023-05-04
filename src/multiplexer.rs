@@ -166,8 +166,9 @@ where
                 maybe_msg = message_stream.next() => {
                     match maybe_msg {
                         Some(msg) => {
-                                let me = Arc::clone(&self);
-                                me.dispatch_message(msg, open_stream).await?;
+                            tracing::trace!("Received {msg} from stream");
+                            let me = Arc::clone(&self);
+                            me.dispatch_message(msg, open_stream).await?;
                         },
                         None => {
                             tracing::info!("Stream has ended");
@@ -178,6 +179,7 @@ where
                 maybe_msg = rx.recv() => {
                     match maybe_msg {
                         Some(msg) => {
+                            tracing::trace!("Sending  {msg} to stream");
                             message_stream.send(msg).await?;
                         },
                         None => {
@@ -190,8 +192,10 @@ where
                     #[cfg(feature = "heartbeat")]
                     {
                         let msg = crate::proto::Message::<C>::Ping(self.config.get_next_id());
+                        tracing::trace!("Sending  {msg} to stream (heartbeat)");
                         message_stream.send(msg).await?;
                     }
+                    message_stream.flush().await?;
                 }
             }
         }
@@ -266,18 +270,27 @@ where
             Response::Error {
                 channel_id,
                 message,
-            } => (channel_id, Err(message)),
+            } => {
+                tracing::debug!("Channel {channel_id} reported an error");
+                (channel_id, Err(message))
+            }
             Response::New {
                 channel_id,
                 endpoint,
-            } => (
-                channel_id,
-                Ok(Response::New {
+            } => {
+                tracing::debug!("Channel {channel_id} has been opened remotely");
+                (
                     channel_id,
-                    endpoint,
-                }),
-            ),
-            Response::Close { channel_id } => (channel_id, Ok(response)),
+                    Ok(Response::New {
+                        channel_id,
+                        endpoint,
+                    }),
+                )
+            }
+            Response::Close { channel_id } => {
+                tracing::debug!("Channel {channel_id} has been closed remotely");
+                (channel_id, Ok(response))
+            }
         };
         let maybe_tx = {
             let mut queue = self.queue.lock()?;
@@ -321,7 +334,7 @@ where
                 channel_id,
                 endpoint,
             } => {
-                tracing::info!("Channel {channel_id} associated with {endpoint}");
+                tracing::debug!("Request open channel#{channel_id} on {endpoint}");
                 match open_stream(endpoint).await {
                     Ok((stream, peer_endpoint)) => {
                         let mut channel = self.create_channel_with_id(channel_id, stream)?;
@@ -368,6 +381,7 @@ where
         self: Arc<Self>,
         channel_id: ChannelId,
     ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
+        tracing::debug!("Requesting closing of channel {channel_id} remotely");
         let req = Request::Close { channel_id };
         self.request(req).await
     }
@@ -377,6 +391,7 @@ where
         channel_id: ChannelId,
         endpoint: Endpoint<C>,
     ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
+        tracing::debug!("Requesting opening of new channel {channel_id} remotely");
         let req = Request::New {
             channel_id,
             endpoint,
@@ -419,7 +434,10 @@ where
                             self.tx.send((self.id, Vec::new()).into()).await?;
                             break;
                         },
-                        Ok(n) => self.tx.send((self.id, buffer[..n].to_vec()).into()).await?,
+                        Ok(n) => {
+                            tracing::trace!("Writing {n} bytes from stream to channel {id}", id = self.id);
+                            self.tx.send((self.id, buffer[..n].to_vec()).into()).await?
+                        }
                         Err(e) => {
                             tracing::warn!("Got error while reading stream: {e}");
                             return Err(e.into());
@@ -429,7 +447,7 @@ where
                 maybe_data = self.rx.recv() => {
                     match maybe_data {
                         Some(data) => {
-                            tracing::trace!("Writing {n} bytes to channel {id} stream", n = data.len(), id = self.id);
+                            tracing::trace!("Writing {n} bytes from channel#{id} to stream", n = data.len(), id = self.id);
                             if data.is_empty() {
                                 break;
                             }

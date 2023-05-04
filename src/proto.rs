@@ -238,12 +238,6 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut project = self.project();
         loop {
-            tracing::trace!(
-                "rx_buffer: len={len}, capacity={cap}, offset={offset}",
-                len = project.rx_buffer.len(),
-                cap = project.rx_buffer.capacity(),
-                offset = project.rx_offset
-            );
             match Self::get_buffered_next(project.rx_buffer, project.rx_offset) {
                 MessageStreamResult::Ok(m) => return Poll::Ready(Some(m)),
                 MessageStreamResult::Incomplete(n) => {
@@ -252,7 +246,6 @@ where
                         nom::Needed::Size(s) => s.get(),
                     }
                     .max(1024);
-                    tracing::trace!("Reserve space for {size} bytes for next read");
                     project.rx_buffer.reserve(size);
                     let mut read_buf = ReadBuf::uninit(project.rx_buffer.spare_capacity_mut());
                     if let Err(e) = ready!(project.inner.as_mut().poll_read(cx, &mut read_buf)) {
