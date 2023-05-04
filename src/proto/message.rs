@@ -12,7 +12,7 @@ use nom::{
     error::context,
     multi::length_value,
     number::streaming::{be_u32, be_u64, be_u8},
-    sequence::{preceded, tuple},
+    sequence::tuple,
 };
 
 /// Messages that can be exchanged
@@ -125,7 +125,7 @@ where
         {
             context(
                 "Message",
-                preceded(tag(&MESSAGE_TAG[..]), length_value(be_u32, parse_message)),
+                nom::sequence::preceded(tag(&MESSAGE_TAG[..]), length_value(be_u32, parse_message)),
             )(buffer)
         }
 

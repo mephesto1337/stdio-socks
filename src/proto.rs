@@ -192,6 +192,13 @@ where
             return;
         }
 
+        // If all data is consummed, just clear everything
+        if *offset == buffer.len() {
+            buffer.clear();
+            *offset = 0;
+            return;
+        }
+
         let destination = buffer.as_mut_ptr();
         let size = buffer[*offset..].len();
         let source = buffer[*offset..].as_ptr();
@@ -240,13 +247,13 @@ where
             match Self::get_buffered_next(project.rx_buffer, project.rx_offset) {
                 MessageStreamResult::Ok(m) => return Poll::Ready(Some(m)),
                 MessageStreamResult::Incomplete(n) => {
-                    project.rx_buffer.reserve(
-                        match n {
-                            nom::Needed::Unknown => 0,
-                            nom::Needed::Size(s) => s.get(),
-                        }
-                        .max(1024),
-                    );
+                    let size = match n {
+                        nom::Needed::Unknown => 0,
+                        nom::Needed::Size(s) => s.get(),
+                    }
+                    .max(1024);
+                    tracing::trace!("Reserve space for {size} bytes for next read");
+                    project.rx_buffer.reserve(size);
                     let mut read_buf = ReadBuf::uninit(project.rx_buffer.spare_capacity_mut());
                     if let Err(e) = ready!(project.inner.as_mut().poll_read(cx, &mut read_buf)) {
                         tracing::error!("Got underlying IO error: {e}");
@@ -291,6 +298,7 @@ where
             );
             let buf = &project.tx_buffer[*project.tx_offset..];
             if buf.is_empty() {
+                Self::move_to_start(project.tx_buffer, project.tx_offset);
                 return Poll::Ready(Ok(()));
             }
             match ready!(project.inner.as_mut().poll_write(cx, buf)) {
