@@ -226,22 +226,20 @@ where
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let mut project = self.project();
-        loop {
+        while *project.offset < project.buffer.len() {
             let buf = &project.buffer[*project.offset..];
-            assert!(
-                *project.offset < project.buffer.len(),
-                "Will do a 0 bytes write"
-            );
             match ready!(project.inner.as_mut().poll_write(cx, buf)) {
                 Ok(n) => {
                     *project.offset += n;
                     if *project.offset == project.buffer.len() {
-                        break Poll::Ready(Ok(()));
+                        return Poll::Ready(Ok(()));
                     }
                 }
-                Err(e) => break Poll::Ready(Err(e)),
+                Err(e) => return Poll::Ready(Err(e)),
             }
         }
+
+        Poll::Ready(Ok(()))
     }
 
     fn start_send(self: Pin<&mut Self>, item: Message<C>) -> Result<(), Self::Error> {
