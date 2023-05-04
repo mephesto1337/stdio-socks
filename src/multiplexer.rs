@@ -36,6 +36,14 @@ pub struct Config {
     channel_size: usize,
 }
 
+impl Config {
+    #[cfg(feature = "heartbeat")]
+    fn get_next_id(&self) -> u64 {
+        self.ping_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -184,7 +192,7 @@ where
                     #[cfg(feature = "heartbeat")]
                     {
                         tracing::trace!("Sending  ping    to   stream");
-                        let msg = crate::proto::Message::<C>::Ping(self.config.ping_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                        let msg = crate::proto::Message::<C>::Ping(self.config.get_next_id());
                         message_stream.send(msg).await?;
                     }
                 }
