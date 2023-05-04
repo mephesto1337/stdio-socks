@@ -1,6 +1,6 @@
 [package]
 name = "multiplex"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [features]
@@ -16,3 +16,5 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 nom = "7"
 tracing = { version = "0.1", features = ["log"] }
+futures = "0.3"
+pin-project = "1"

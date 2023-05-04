@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, mem::size_of};
 
 use crate::ChannelId;
 
@@ -10,7 +10,8 @@ use nom::bytes::streaming::tag;
 use nom::{
     combinator::map,
     error::context,
-    number::streaming::{be_u64, be_u8},
+    multi::length_value,
+    number::streaming::{be_u32, be_u64, be_u8},
     sequence::{preceded, tuple},
 };
 
@@ -78,6 +79,10 @@ where
             buffer.extend_from_slice(MESSAGE_TAG);
         }
 
+        let size_offset = buffer.len();
+        buffer.extend_from_slice(&[0u8; size_of::<u32>()][..]);
+
+        let old_size = buffer.len();
         match self {
             Self::Request(ref request) => {
                 buffer.push(MESSAGE_TYPE_REQUEST);
@@ -106,6 +111,10 @@ where
                 buffer.extend_from_slice(&id.to_be_bytes()[..]);
             }
         }
+        let new_size = buffer.len();
+
+        let message_size: u32 = (new_size - old_size).try_into().unwrap();
+        buffer[size_offset..][..size_of::<u32>()].copy_from_slice(&message_size.to_be_bytes()[..]);
     }
 
     fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
@@ -114,12 +123,15 @@ where
     {
         #[cfg(debug_assertions)]
         {
-            context("Message", preceded(tag(&MESSAGE_TAG[..]), parse_message))(buffer)
+            context(
+                "Message",
+                preceded(tag(&MESSAGE_TAG[..]), length_value(be_u32, parse_message)),
+            )(buffer)
         }
 
         #[cfg(not(debug_assertions))]
         {
-            context("Message", parse_message)(buffer)
+            context("Message", length_value(be_u32, parse_message))(buffer)
         }
     }
 }

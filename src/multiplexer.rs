@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
+    fmt,
     future::Future,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
-    {fmt, io},
 };
 
+use futures::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, oneshot},
@@ -13,7 +14,7 @@ use tokio::{
 };
 
 use crate::{
-    proto::{Endpoint, Message, RawCustom, Request, Response, Wire},
+    proto::{Endpoint, Message, MessageStream, RawCustom, Request, Response, Wire},
     ChannelId, Result,
 };
 
@@ -81,87 +82,6 @@ pub struct Channel<C = RawCustom> {
     stream: Box<dyn Stream>,
 }
 
-fn buffer_memmove<T>(buffer: &mut Vec<T>, position: usize) {
-    if position == 0 {
-        return;
-    } else if position == buffer.len() {
-        buffer.clear();
-        return;
-    }
-
-    let dst = buffer.as_mut_ptr();
-    assert!(position < buffer.len());
-    let new_len = buffer.len() - position;
-    unsafe {
-        // SAFETY: we checked that position is within the slice's bounds
-        let src = dst.offset(
-            position
-                .try_into()
-                .expect("Cannot fit a usize into a isize"),
-        );
-        // SAFETY:
-        // * src is valid for reads  of `position * sizeof::<T>()`
-        // * dst is valid for writes of `position * sizeof::<T>()`
-        // * both src and dst are properly aligned
-        std::intrinsics::copy(src, dst, new_len);
-
-        // SAFETY: position < buffer.len()
-        buffer.set_len(new_len);
-    }
-}
-
-async fn recv_message<'i, S, C>(stream: &mut S, buffer: &mut Vec<u8>) -> Result<Option<Message<C>>>
-where
-    C: Wire + fmt::Display + fmt::Debug,
-    S: AsyncRead + Send + Unpin,
-{
-    let start = buffer.len();
-    buffer.reserve(4096);
-    let size = stream.read_buf(buffer).await?;
-    tracing::trace!("Receive buffer size: {len} (+{size})", len = buffer.len());
-    if size == 0 {
-        return Err(
-            io::Error::new(io::ErrorKind::BrokenPipe, "Remote end has closed stream").into(),
-        );
-    }
-    assert_eq!(buffer.len(), start + size);
-    match Message::decode::<nom::error::VerboseError<&[u8]>>(&buffer[..]) {
-        Ok((rest, msg)) => {
-            let new_len = rest.len();
-            let consumed_bytes = buffer.len() - rest.len();
-            tracing::trace!("Resizing buffer, shift of {consumed_bytes}");
-            tracing::trace!("{:?} => {msg:?}", &buffer[..consumed_bytes]);
-            buffer_memmove(buffer, consumed_bytes);
-            assert_eq!(buffer.len(), new_len);
-            Ok(Some(msg))
-        }
-        Err(e) => {
-            tracing::trace!("Buffer: {:?}", &buffer[..]);
-            match e {
-                nom::Err::Incomplete(i) => {
-                    match i {
-                        nom::Needed::Unknown => {
-                            tracing::debug!("Decode error missing bytes");
-                        }
-                        nom::Needed::Size(s) => {
-                            tracing::debug!("Decode error missing {s} bytes");
-                        }
-                    }
-                    Ok(None)
-                }
-                nom::Err::Error(e) => {
-                    tracing::warn!(
-                        "Decode error (recoverable): {err}",
-                        err = crate::error::nom_to_owned(nom::Err::Error(e))
-                    );
-                    Ok(None)
-                }
-                nom::Err::Failure(e) => Err(nom::Err::Failure(e).into()),
-            }
-        }
-    }
-}
-
 pub type OpenStreamResult<C> = Result<(Box<dyn Stream>, Option<Endpoint<C>>)>;
 
 impl<C> Multiplexer<C>
@@ -207,7 +127,7 @@ where
 
     pub async fn serve<O, S, F>(
         self: Arc<Self>,
-        mut stream: S,
+        stream: S,
         mut rx: mpsc::Receiver<Message<C>>,
         open_stream: &O,
     ) -> Result<()>
@@ -216,8 +136,7 @@ where
         O: Fn(Endpoint<C>) -> F,
         F: Future<Output = OpenStreamResult<C>> + Send + Unpin,
     {
-        let mut rx_buffer = Vec::with_capacity(8192);
-        let mut tx_buffer = Vec::with_capacity(8192);
+        let mut message_stream = MessageStream::<C, _>::new(stream);
 
         let sleep_duration;
         #[cfg(feature = "heartbeat")]
@@ -234,29 +153,24 @@ where
             tokio::pin!(sleep);
 
             tokio::select! {
-                maybe_msg = recv_message(&mut stream, &mut rx_buffer) => {
+                maybe_msg = message_stream.next() => {
                     match maybe_msg {
-                        Ok(msg) => {
-                            if let Some(msg) = msg {
+                        Some(msg) => {
                                 tracing::trace!("Received message from stream: {msg}");
                                 let me = Arc::clone(&self);
                                 me.dispatch_message(msg, open_stream).await?;
-                            }
                         },
-                        Err(e) => {
-                            tracing::error!("Received error from other end: {e}");
-                            return Err(e);
+                        None => {
+                            tracing::info!("Stream has ended");
+                            break;
                         }
                     }
                 },
                 maybe_msg = rx.recv() => {
                     match maybe_msg {
                         Some(msg) => {
-                            tx_buffer.clear();
-                            msg.encode_into(&mut tx_buffer);
-                            stream.write_all(&tx_buffer[..]).await?;
-                            tracing::trace!("Sending  message to   stream: {msg} ({n} bytes)", n = tx_buffer.len());
-                            stream.flush().await?;
+                            tracing::trace!("Sending  message to   stream: {msg}");
+                            message_stream.send(msg).await?;
                         },
                         None => {
                             tracing::info!("No more message to be received");
@@ -267,12 +181,9 @@ where
                 _ = &mut sleep => {
                     #[cfg(feature = "heartbeat")]
                     {
-                        tx_buffer.clear();
+                        tracing::trace!("Sending  ping    to   stream");
                         let msg = crate::proto::Message::<C>::Ping(self.config.ping_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-                        msg.encode_into(&mut tx_buffer);
-                        stream.write_all(&tx_buffer[..]).await?;
-                        tracing::trace!("Sending  heartbeat to stream");
-                        stream.flush().await?;
+                        message_stream.send(msg).await?;
                     }
                 }
             }
@@ -334,7 +245,7 @@ where
         }
     }
 
-    pub async fn send(&self, msg: impl Into<Message<C>>) -> Result<()> {
+    async fn send(&self, msg: impl Into<Message<C>>) -> Result<()> {
         if let Err(e) = self.tx.send(msg.into()).await {
             tracing::error!("Could not send {e:?} to remote");
             Err(e.into())
