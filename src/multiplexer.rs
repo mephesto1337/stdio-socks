@@ -52,6 +52,8 @@ impl Default for Config {
 
 impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Unpin {}
 
+type QueueValue<C> = oneshot::Sender<std::result::Result<Response<C>, String>>;
+
 /// Server part for the multiplexer
 pub struct Multiplexer<C = RawCustom> {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
@@ -61,7 +63,7 @@ pub struct Multiplexer<C = RawCustom> {
     tx: mpsc::Sender<Message<C>>,
 
     /// Waiting responses
-    queue: Mutex<HashMap<ChannelId, oneshot::Sender<std::result::Result<Response<C>, String>>>>,
+    queue: Mutex<HashMap<ChannelId, QueueValue<C>>>,
 
     /// Configuration
     config: Config,
