@@ -166,7 +166,6 @@ where
                 maybe_msg = message_stream.next() => {
                     match maybe_msg {
                         Some(msg) => {
-                                tracing::trace!("Received message from stream: {msg}");
                                 let me = Arc::clone(&self);
                                 me.dispatch_message(msg, open_stream).await?;
                         },
@@ -179,7 +178,6 @@ where
                 maybe_msg = rx.recv() => {
                     match maybe_msg {
                         Some(msg) => {
-                            tracing::trace!("Sending  message to   stream: {msg}");
                             message_stream.send(msg).await?;
                         },
                         None => {
@@ -191,7 +189,6 @@ where
                 _ = &mut sleep => {
                     #[cfg(feature = "heartbeat")]
                     {
-                        tracing::trace!("Sending  ping    to   stream");
                         let msg = crate::proto::Message::<C>::Ping(self.config.get_next_id());
                         message_stream.send(msg).await?;
                     }

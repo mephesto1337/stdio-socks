@@ -185,7 +185,7 @@ enum MessageStreamResult<C> {
 
 impl<C, S> MessageStream<C, S>
 where
-    C: Wire,
+    C: Wire + std::fmt::Display,
 {
     fn move_to_start(buffer: &mut Vec<u8>, offset: &mut usize) {
         if *offset < 2048 {
@@ -206,7 +206,9 @@ where
     fn get_buffered_next(buffer: &mut Vec<u8>, offset: &mut usize) -> MessageStreamResult<C> {
         match Message::<C>::decode_verbose(&buffer[*offset..]) {
             Ok((rest, msg)) => {
-                *offset = buffer.offset(rest);
+                let size = buffer[*offset..].offset(rest);
+                tracing::trace!("Received {size} bytes message: {msg}");
+                *offset += size;
                 Self::move_to_start(buffer, offset);
                 MessageStreamResult::Ok(msg)
             }
@@ -221,7 +223,7 @@ where
 
 impl<C, S> Stream for MessageStream<C, S>
 where
-    C: Wire,
+    C: Wire + std::fmt::Display,
     S: AsyncRead,
 {
     type Item = Message<C>;
@@ -229,6 +231,12 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut project = self.project();
         loop {
+            tracing::trace!(
+                "rx_buffer: len={len}, capacity={cap}, offset={offset}",
+                len = project.rx_buffer.len(),
+                cap = project.rx_buffer.capacity(),
+                offset = project.rx_offset
+            );
             match Self::get_buffered_next(project.rx_buffer, project.rx_offset) {
                 MessageStreamResult::Ok(m) => return Poll::Ready(Some(m)),
                 MessageStreamResult::Incomplete(n) => {
@@ -244,7 +252,8 @@ where
                         tracing::error!("Got underlying IO error: {e}");
                         return Poll::Ready(None);
                     }
-                    let n = read_buf.initialized().len();
+                    let n = read_buf.filled().len();
+                    tracing::trace!("Read {n} bytes from underlying stream");
                     if n == 0 {
                         // EOF
                         return Poll::Ready(None);
@@ -266,7 +275,7 @@ where
 
 impl<C, S> Sink<Message<C>> for MessageStream<C, S>
 where
-    C: Wire,
+    C: Wire + std::fmt::Display,
     S: AsyncWrite,
 {
     type Error = io::Error;
@@ -274,12 +283,19 @@ where
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let mut project = self.project();
         loop {
+            tracing::trace!(
+                "tx_buffer: len={len}, capacity={cap}, offset={offset}",
+                len = project.tx_buffer.len(),
+                cap = project.tx_buffer.capacity(),
+                offset = project.tx_offset
+            );
             let buf = &project.tx_buffer[*project.tx_offset..];
             if buf.is_empty() {
                 return Poll::Ready(Ok(()));
             }
             match ready!(project.inner.as_mut().poll_write(cx, buf)) {
                 Ok(n) => {
+                    tracing::trace!("Wrote {n} to underlying stream");
                     *project.tx_offset += n;
                 }
                 Err(e) => return Poll::Ready(Err(e)),
@@ -289,7 +305,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: Message<C>) -> Result<(), Self::Error> {
         let project = self.project();
-        project.tx_buffer.clear();
+        tracing::trace!("Will send {item} to stream");
         item.encode_into(project.tx_buffer);
         Ok(())
     }
