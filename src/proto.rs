@@ -13,7 +13,7 @@ use std::{
     pin::Pin,
     task::{ready, Context, Poll},
 };
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufStream};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 
 use crate::ChannelId;
 
@@ -153,7 +153,7 @@ impl<C> From<(ChannelId, String)> for Message<C> {
 #[pin_project]
 pub struct MessageStream<C, S> {
     #[pin]
-    inner: BufStream<S>,
+    inner: BufReader<S>,
     buffer: Vec<u8>,
     offset: usize,
     _type: PhantomData<C>,
@@ -165,7 +165,7 @@ where
 {
     pub fn new(stream: S) -> Self {
         Self {
-            inner: BufStream::new(stream),
+            inner: BufReader::new(stream),
             buffer: Vec::new(),
             offset: 0,
             _type: PhantomData,
@@ -176,7 +176,7 @@ where
 impl<C, S> Stream for MessageStream<C, S>
 where
     C: Wire,
-    S: AsyncRead + AsyncWrite,
+    S: AsyncRead,
 {
     type Item = Message<C>;
 
@@ -228,7 +228,7 @@ where
         let mut project = self.project();
         while *project.offset < project.buffer.len() {
             let buf = &project.buffer[*project.offset..];
-            match ready!(project.inner.as_mut().poll_write(cx, buf)) {
+            match ready!(project.inner.as_mut().get_pin_mut().poll_write(cx, buf)) {
                 Ok(n) => {
                     *project.offset += n;
                     if *project.offset == project.buffer.len() {
