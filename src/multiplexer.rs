@@ -3,7 +3,7 @@ use std::{
     fmt,
     future::Future,
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures::{SinkExt, StreamExt};
@@ -148,6 +148,7 @@ where
             sleep_duration = 60;
         }
 
+        let mut last_flush = Instant::now();
         loop {
             let sleep = time::sleep(Duration::from_secs(sleep_duration));
             tokio::pin!(sleep);
@@ -186,6 +187,11 @@ where
                         message_stream.send(msg).await?;
                     }
                 }
+            }
+
+            if last_flush.elapsed().as_millis() > 200 {
+                message_stream.flush().await?;
+                last_flush = Instant::now();
             }
         }
 
