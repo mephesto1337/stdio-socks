@@ -280,28 +280,8 @@ where
 {
     type Error = io::Error;
 
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let mut project = self.project();
-        loop {
-            tracing::trace!(
-                "tx_buffer: len={len}, capacity={cap}, offset={offset}",
-                len = project.tx_buffer.len(),
-                cap = project.tx_buffer.capacity(),
-                offset = project.tx_offset
-            );
-            let buf = &project.tx_buffer[*project.tx_offset..];
-            if buf.is_empty() {
-                Self::move_to_start(project.tx_buffer, project.tx_offset);
-                return Poll::Ready(Ok(()));
-            }
-            match ready!(project.inner.as_mut().poll_write(cx, buf)) {
-                Ok(n) => {
-                    tracing::trace!("Wrote {n} to underlying stream");
-                    *project.tx_offset += n;
-                }
-                Err(e) => return Poll::Ready(Err(e)),
-            }
-        }
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     fn start_send(self: Pin<&mut Self>, item: Message<C>) -> Result<(), Self::Error> {
@@ -312,7 +292,21 @@ where
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.project().inner.poll_flush(cx)
+        let mut project = self.project();
+        loop {
+            let buf = &project.tx_buffer[*project.tx_offset..];
+            if buf.is_empty() {
+                Self::move_to_start(project.tx_buffer, project.tx_offset);
+                return project.inner.as_mut().poll_flush(cx);
+            }
+            match ready!(project.inner.as_mut().poll_write(cx, buf)) {
+                Ok(n) => {
+                    tracing::trace!("Wrote {n} bytes to underlying stream");
+                    *project.tx_offset += n;
+                }
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+        }
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
