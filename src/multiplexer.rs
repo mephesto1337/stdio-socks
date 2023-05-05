@@ -274,7 +274,7 @@ where
 }
 
 impl<C> Channel<C> {
-    /// Equivalent of [`tokio::io::copy_bidirectionnal`] for channels
+    /// Equivalent of [`tokio::io::copy_bidirectional`] for channels
     pub async fn pipe(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
 

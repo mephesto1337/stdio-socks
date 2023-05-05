@@ -1,4 +1,4 @@
-//! Different structure to pass data as if they were [`Stream`]
+//! Different structure to pass data as if they were [`crate::Stream`]
 
 mod stdio;
 pub use stdio::Stdio;
