@@ -4,7 +4,8 @@
 use nom::{
     combinator::{map, map_opt, rest},
     error::context,
-    number::streaming::be_u8,
+    multi::length_data,
+    number::complete::{be_u32, be_u8},
 };
 
 use crate::ChannelId;
@@ -35,6 +36,8 @@ pub trait Wire: Sized {
 impl Wire for String {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         let data = self.as_bytes();
+        let size: u32 = data.len().try_into().unwrap();
+        buffer.extend_from_slice(&size.to_be_bytes()[..]);
         buffer.extend_from_slice(data);
     }
 
