@@ -33,7 +33,7 @@ where
         let sleep_duration;
         #[cfg(feature = "heartbeat")]
         {
-            sleep_duration = self.config.heartbeat;
+            sleep_duration = self.mp.config.heartbeat;
         }
         #[cfg(not(feature = "heartbeat"))]
         {
@@ -76,7 +76,7 @@ where
                 _ = &mut sleep => {
                     #[cfg(feature = "heartbeat")]
                     {
-                        let msg = crate::proto::Message::<C>::Ping(self.config.get_next_id());
+                        let msg = crate::proto::Message::<C>::Ping(self.mp.config.get_next_id());
                         tracing::trace!("Sending  {msg} to stream (heartbeat)");
                         message_stream.send(msg).await?;
                     }
