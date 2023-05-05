@@ -6,6 +6,8 @@ use std::{
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// Dummy stream which acts like /dev/null.
+/// i.e. Sends EOF on read and accepts all data without actually writting them
 #[derive(Debug, Default)]
 pub struct DevNull;
 

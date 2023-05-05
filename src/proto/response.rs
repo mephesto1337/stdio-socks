@@ -15,15 +15,21 @@ use nom::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     /// Channel `channel_id` was successfully opened
-    Open { channel_id: ChannelId },
+    Open {
+        /// Channel ID that has been successfully opened
+        channel_id: ChannelId,
+    },
     /// An error occured with channel `channel_id`
     Error {
+        /// Channel ID that could not be opened
         channel_id: ChannelId,
+        /// Message describing the error encountered server side.
         message: String,
     },
 }
 
 impl Response {
+    /// Retrieve channel_id from response
     pub fn get_channel_id(&self) -> ChannelId {
         match self {
             Response::Open { channel_id } => *channel_id,

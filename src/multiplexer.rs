@@ -20,6 +20,7 @@ pub use client::MultiplexerClient;
 mod server;
 pub use server::MultiplexerServer;
 
+/// Configuration to use in a multiplex session
 #[derive(Debug)]
 pub struct Config {
     #[cfg(feature = "heartbeat")]
@@ -273,6 +274,7 @@ where
 }
 
 impl<C> Channel<C> {
+    /// Equivalent of [`tokio::io::copy_bidirectionnal`] for channels
     pub async fn pipe(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
 

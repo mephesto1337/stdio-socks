@@ -16,14 +16,20 @@ use nom::{
 pub enum Message<C = RawCustom> {
     /// A request to open a new channel
     RequestOpen {
+        /// Channel ID wanted by client
         channel_id: ChannelId,
+
+        /// endpoint to connect to (passed to [`crate::OpenStreamFn`]
         endpoint: Endpoint<C>,
     },
     /// A response message
     Response(Response),
     /// Data between 2 endpoints
     Data {
+        /// Destination channel ID
         channel_id: ChannelId,
+
+        /// Data to be passed
         data: Vec<u8>,
     },
     #[cfg(feature = "heartbeat")]

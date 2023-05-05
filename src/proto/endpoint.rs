@@ -33,10 +33,18 @@ impl fmt::Display for RawCustom {
 /// Different endpoints to connect to
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint<C = RawCustom> {
-    /// An UNIX socket (STREAM, not DGRAM)
-    UnixSocket { path: String },
-    /// A TCP endpoint
-    TcpSocket { address: Address, port: u16 },
+    /// An UNIX socket (STREAM, not DGRAM). Can be built from [`std::string::String`]
+    UnixSocket {
+        /// Path to the unix socket or windows named pipe
+        path: String,
+    },
+    /// A TCP endpoint. Can be built from [`std::net::SocketAddr`]
+    TcpSocket {
+        /// Address to connect to
+        address: Address,
+        /// Port to connect to
+        port: u16,
+    },
     /// A Custom endpoint
     Custom(C),
 }
@@ -53,6 +61,12 @@ impl<C> From<SocketAddr> for Endpoint<C> {
                 port: saddr6.port(),
             },
         }
+    }
+}
+
+impl<C> From<String> for Endpoint<C> {
+    fn from(path: String) -> Self {
+        Self::UnixSocket { path }
     }
 }
 

@@ -52,6 +52,8 @@
 //!     server.serve(stream).await.unwrap();
 //! }
 //! ```
+
+/// Type alias for identifying channels
 pub type ChannelId = u64;
 
 pub mod proto;
@@ -59,14 +61,7 @@ pub mod proto;
 mod error;
 pub use error::{Error, Result};
 
-mod stdio;
-pub use stdio::Stdio;
-
-mod empty;
-pub use empty::DevNull;
-
-mod bytes_io;
-pub use bytes_io::BytesIO;
+pub mod utils;
 
 mod multiplexer;
 pub use multiplexer::{Channel, Config, MultiplexerClient, MultiplexerServer};
@@ -96,6 +91,7 @@ use tokio::{
     sync::mpsc::Receiver,
 };
 
+/// Builder for multiplexers
 pub struct MultiplexerBuilder<M, C = proto::RawCustom> {
     _mode: PhantomData<M>,
     mp: Arc<multiplexer::Multiplexer<C>>,
@@ -110,17 +106,21 @@ async fn open_stream<C>(_: proto::Endpoint<C>) -> OpenStreamResult {
     )))
 }
 
+/// Unit type to make [`MultiplexerBuilder`] a builder suitable for clients
 pub struct ModeClient;
+/// Unit type to make [`MultiplexerBuilder`] a builder suitable for servers
 pub struct ModeServer;
 
 impl<C> MultiplexerBuilder<ModeClient, C>
 where
     C: proto::Wire + fmt::Display + fmt::Debug + Send + 'static,
 {
+    /// Creates a new multiplexer client with default configuration
     pub fn new() -> Self {
         Self::new_with_config(Config::default())
     }
 
+    /// Creates a new multiplexer client with specified configuration
     pub fn new_with_config(config: Config) -> Self {
         let (mp, rx) = multiplexer::Multiplexer::create_with_config(config);
         Self {
@@ -131,6 +131,7 @@ where
         }
     }
 
+    /// Build multiplexer pair
     pub fn build(self) -> (MultiplexerClient<C>, MultiplexerServer<C>) {
         (
             MultiplexerClient {
@@ -150,10 +151,12 @@ impl<C> MultiplexerBuilder<ModeServer, C>
 where
     C: proto::Wire + fmt::Display + fmt::Debug + Send + 'static,
 {
+    /// Creates a new multiplexer server with default configuration
     pub fn new(open_stream: Box<OpenStreamFn<C>>) -> Self {
         Self::new_with_config(open_stream, Config::default())
     }
 
+    /// Creates a new multiplexer server with specified configuration
     pub fn new_with_config(open_stream: Box<OpenStreamFn<C>>, config: Config) -> Self {
         let (mp, rx) = multiplexer::Multiplexer::create_with_config(config);
         Self {
@@ -164,6 +167,7 @@ where
         }
     }
 
+    /// Builds multiplexer server
     pub fn build(mut self) -> MultiplexerServer<C> {
         MultiplexerServer {
             open_stream: self.open_stream.take().unwrap(),

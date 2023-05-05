@@ -6,6 +6,7 @@ use std::{
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// Wraps STDIN/STDOUT
 pub struct Stdio {
     stdin: tokio::io::Stdin,
     stdout: tokio::io::Stdout,
@@ -18,6 +19,7 @@ impl Default for Stdio {
 }
 
 impl Stdio {
+    /// Create a new Stdio stream
     pub fn new() -> Self {
         Self {
             stdin: tokio::io::stdin(),

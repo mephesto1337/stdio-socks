@@ -50,13 +50,15 @@ impl fmt::Display for Packet {
     }
 }
 
+/// A struct to implemented [`tokio_util::codec::Encoder`] and [`tokio_util::codec::Decoder`] to
+/// received and send [`crate::proto::Message`]
 pub struct PacketCodec<M> {
     packet: Packet,
     _marker: PhantomData<M>,
 }
 
-impl<M> PacketCodec<M> {
-    pub fn new() -> Self {
+impl<M> Default for PacketCodec<M> {
+    fn default() -> Self {
         Self {
             packet: Packet {
                 buffer: Vec::new(),

@@ -1,3 +1,6 @@
+//! All the structures used to multiplex streams into a single one.
+//!
+//!
 use nom::{
     combinator::{map, map_opt, rest},
     error::context,
@@ -6,6 +9,7 @@ use nom::{
 
 use crate::ChannelId;
 
+/// Trait used for serialization/deserialization
 pub trait Wire: Sized {
     /// Encodes it-self into a buffer
     fn encode(&self) -> Vec<u8> {
@@ -22,6 +26,7 @@ pub trait Wire: Sized {
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>;
 
+    /// Variant of [`Wire::decode`] with [`nom::error::VerboseError`] as error type
     fn decode_verbose(buffer: &[u8]) -> nom::IResult<&[u8], Self, nom::error::VerboseError<&[u8]>> {
         Self::decode(buffer)
     }
@@ -80,14 +85,12 @@ mod address;
 mod endpoint;
 mod message;
 mod packet;
-mod request;
 mod response;
 
 pub use address::Address;
 pub use endpoint::{Endpoint, RawCustom};
 pub use message::Message;
 pub use packet::PacketCodec;
-pub use request::Request;
 pub use response::Response;
 
 impl<C> From<Response> for Message<C> {

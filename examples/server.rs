@@ -1,7 +1,7 @@
 use std::{io, net::SocketAddr};
 
 use multiplex::{
-    proto, Error, ModeServer, MultiplexerBuilder, OpenStreamResult, Result, Stdio, Stream,
+    proto, utils::Stdio, Error, ModeServer, MultiplexerBuilder, OpenStreamResult, Result, Stream,
 };
 
 async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult {

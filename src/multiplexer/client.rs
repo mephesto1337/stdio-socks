@@ -12,6 +12,7 @@ use crate::{
     Channel, ChannelId, Result, Stream,
 };
 
+/// Multiplexer client
 pub struct MultiplexerClient<C = RawCustom> {
     pub(crate) mp: Arc<super::Multiplexer<C>>,
     pub(crate) channel_id: AtomicU64,
@@ -26,6 +27,8 @@ where
         Arc::clone(&self.mp)
     }
 
+    /// Request remote end to open a channel with the given endpoint. Returns the id chosen for
+    /// both ends.
     pub async fn request_open(&self, endpoint: proto::Endpoint<C>) -> Result<ChannelId> {
         let channel_id = self.channel_id.fetch_add(1, Ordering::Relaxed);
         let rx = self
@@ -51,6 +54,16 @@ where
         }
     }
 
+    /// Creates locally a channel associated with stream. You should call the method after having
+    /// requesting an remote opening:
+    ///
+    /// ```rust
+    /// let client: MultiplexerClient = ...;
+    /// let stream: TcpStream = ...;
+    /// let channel_id = client.request_open(Endpoint { ... }).await.unwrap();
+    /// let mut channel = client.create_channel(stream, channel_id).unwrap();
+    /// channel.pipe().await.unwrap();
+    /// ```
     pub fn create_channel<S>(&self, stream: S, channel_id: ChannelId) -> Result<Channel<C>>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,

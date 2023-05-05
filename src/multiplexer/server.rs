@@ -12,6 +12,7 @@ use crate::{
     OpenStreamFn, Result,
 };
 
+/// Multiplexer server. It will answer to requests received from stream
 pub struct MultiplexerServer<C = RawCustom> {
     pub(crate) open_stream: Box<OpenStreamFn<C>>,
     pub(crate) mp: Arc<super::Multiplexer<C>>,
@@ -22,11 +23,12 @@ impl<C> MultiplexerServer<C>
 where
     C: proto::Wire + fmt::Display + fmt::Debug + Send + 'static,
 {
+    /// Serve requests from stream
     pub async fn serve<S>(mut self, stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin,
     {
-        let mut message_stream = proto::PacketCodec::new().framed(stream);
+        let mut message_stream = proto::PacketCodec::default().framed(stream);
 
         let sleep_duration;
         #[cfg(feature = "heartbeat")]

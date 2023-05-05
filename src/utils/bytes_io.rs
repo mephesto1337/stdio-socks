@@ -29,6 +29,7 @@ impl From<String> for BytesIO {
 }
 
 impl BytesIO {
+    /// Creates new read-only view of bytes `data`
     pub fn new(data: impl AsRef<[u8]>) -> Self {
         Self {
             buffer: data.as_ref().to_vec(),

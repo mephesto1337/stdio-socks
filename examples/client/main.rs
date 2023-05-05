@@ -7,7 +7,8 @@ use clap::Parser;
 
 use multiplex::{
     proto::{self, Wire},
-    ModeClient, MultiplexerBuilder, MultiplexerClient, Result, Stdio,
+    utils::Stdio,
+    ModeClient, MultiplexerBuilder, MultiplexerClient, Result,
 };
 
 mod socks;
