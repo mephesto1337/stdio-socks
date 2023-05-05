@@ -4,7 +4,7 @@
 use nom::{
     combinator::{map, map_opt, rest},
     error::context,
-    multi::length_data,
+    multi::{length_count, length_data},
     number::complete::{be_u32, be_u8},
 };
 
@@ -51,6 +51,26 @@ impl Wire for String {
                 std::str::from_utf8(bytes).ok().map(|s| s.to_owned())
             }),
         )(buffer)
+    }
+}
+
+impl<T> Wire for Vec<T>
+where
+    T: Wire,
+{
+    fn encode_into(&self, buffer: &mut Vec<u8>) {
+        let size: u32 = self.len().try_into().unwrap();
+        buffer.extend_from_slice(&size.to_be_bytes()[..]);
+        for elt in self {
+            elt.encode_into(buffer);
+        }
+    }
+
+    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
+    where
+        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
+    {
+        context("Array", length_count(be_u32, T::decode))(buffer)
     }
 }
 
