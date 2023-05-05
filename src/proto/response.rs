@@ -2,10 +2,7 @@ use std::fmt;
 
 use crate::ChannelId;
 
-use super::{
-    endpoint::{Endpoint, RawCustom},
-    Wire,
-};
+use super::Wire;
 
 use nom::{
     combinator::map,
@@ -16,14 +13,9 @@ use nom::{
 
 /// Responses to requests
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Response<C = RawCustom> {
+pub enum Response {
     /// Channel `channel_id` was successfully opened
-    New {
-        channel_id: ChannelId,
-        endpoint: Option<Endpoint<C>>,
-    },
-    /// Channel `channel_id` was successfully closed
-    Close { channel_id: ChannelId },
+    Open { channel_id: ChannelId },
     /// An error occured with channel `channel_id`
     Error {
         channel_id: ChannelId,
@@ -31,31 +23,23 @@ pub enum Response<C = RawCustom> {
     },
 }
 
-const RESPONSE_TYPE_NEW: u8 = 1;
-const RESPONSE_TYPE_CLOSE: u8 = 2;
-const RESPONSE_TYPE_ERROR: u8 = 3;
+impl Response {
+    pub fn get_channel_id(&self) -> ChannelId {
+        match self {
+            Response::Open { channel_id } => *channel_id,
+            Response::Error { channel_id, .. } => *channel_id,
+        }
+    }
+}
 
-impl<C> Wire for Response<C>
-where
-    C: Wire,
-{
+const RESPONSE_TYPE_OPEN: u8 = 1;
+const RESPONSE_TYPE_ERROR: u8 = 2;
+
+impl Wire for Response {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         match self {
-            Self::New {
-                channel_id,
-                endpoint,
-            } => {
-                buffer.push(RESPONSE_TYPE_NEW);
-                buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
-                if let Some(endpoint) = endpoint.as_ref() {
-                    buffer.push(1);
-                    endpoint.encode_into(buffer);
-                } else {
-                    buffer.push(0);
-                }
-            }
-            Self::Close { channel_id } => {
-                buffer.push(RESPONSE_TYPE_CLOSE);
+            Self::Open { channel_id } => {
+                buffer.push(RESPONSE_TYPE_OPEN);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
             }
             Self::Error {
@@ -76,20 +60,9 @@ where
         let (rest, response_type) = be_u8(buffer)?;
 
         match response_type {
-            RESPONSE_TYPE_NEW => context(
-                "Response::New",
-                map(
-                    tuple((be_u64, Option::<Endpoint<C>>::decode)),
-                    |(channel_id, endpoint)| Self::New {
-                        channel_id,
-                        endpoint,
-                    },
-                ),
-            )(rest),
-
-            RESPONSE_TYPE_CLOSE => context(
-                "Response::Close",
-                map(be_u64, |channel_id| Self::Close { channel_id }),
+            RESPONSE_TYPE_OPEN => context(
+                "Response::Open",
+                map(be_u64, |channel_id| Self::Open { channel_id }),
             )(rest),
 
             RESPONSE_TYPE_ERROR => context(
@@ -111,34 +84,16 @@ where
     }
 }
 
-impl<C> fmt::Display for Response<C>
-where
-    C: fmt::Display,
-{
+impl fmt::Display for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::New {
-                channel_id,
-                endpoint: Some(ep),
-            } => write!(
-                f,
-                "Response::New {{ channel_id: {}, endpoint: {} }}",
-                channel_id, ep
-            ),
-            Self::New {
-                channel_id,
-                endpoint: None,
-            } => write!(f, "Response::New {{ channel_id: {} }}", channel_id),
-            Self::Close { channel_id } => {
-                write!(f, "Response::Close {{ channel_id: {} }}", channel_id)
-            }
+            Self::Open { channel_id } => write!(f, "Response::Open {{ channel_id: {channel_id} }}"),
             Self::Error {
                 channel_id,
                 ref message,
             } => write!(
                 f,
-                "Response::Error {{ channel_id: {}, message: {} }}",
-                channel_id, message
+                "Response::Error {{ channel_id: {channel_id}, message: {message} }}",
             ),
         }
     }

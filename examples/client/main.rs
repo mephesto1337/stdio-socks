@@ -1,5 +1,3 @@
-use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,8 +5,10 @@ use tokio::net::{TcpListener, TcpStream};
 
 use clap::Parser;
 
-use multiplex::proto::{self, Wire};
-use multiplex::{ChannelId, Error, Multiplexer, OpenStreamResult, Result, Stdio, Stream};
+use multiplex::{
+    proto::{self, Wire},
+    ModeClient, MultiplexerBuilder, MultiplexerClient, Result, Stdio,
+};
 
 mod socks;
 
@@ -19,17 +19,13 @@ struct Args {
     bind_addr: std::net::SocketAddr,
 }
 
-async fn handshake(
-    mp: Arc<Multiplexer>,
-    mut client: TcpStream,
-    channel_id: ChannelId,
-) -> Result<()> {
+async fn handle_client(mp: Arc<MultiplexerClient>, mut client: TcpStream) -> Result<()> {
     let mut rx_buffer = [0u8; 256];
     let mut tx_buffer = Vec::with_capacity(32);
     let size = client.read(&mut rx_buffer[..]).await?;
 
     // Hello
-    let (_rest, hello) = socks::Hello::decode(&mut &rx_buffer[..size])?;
+    let (_rest, hello) = socks::Hello::decode(&rx_buffer[..size])?;
     if !hello.methods.contains(&socks::AuthenticationMethod::None) {
         let response = socks::HelloResponse {
             version: socks::Version::Socks5,
@@ -52,43 +48,38 @@ async fn handshake(
 
     // Connect request
     let size = client.read(&mut rx_buffer[..]).await?;
-    let (_rest, request) = socks::Request::decode(&mut &rx_buffer[..size])?;
+    let (_rest, request) = socks::Request::decode(&rx_buffer[..size])?;
 
     let address = match request.addr {
-        socks::AddressType::IPv4(ref ip4) => proto::Address::Ipv4(ip4.clone()),
-        socks::AddressType::IPv6(ref ip6) => proto::Address::Ipv6(ip6.clone()),
+        socks::AddressType::IPv4(ref ip4) => proto::Address::Ipv4(*ip4),
+        socks::AddressType::IPv6(ref ip6) => proto::Address::Ipv6(*ip6),
         socks::AddressType::DomainName(ref name) => proto::Address::Name(name.clone()),
     };
     let endpoint = proto::Endpoint::TcpSocket {
         address,
         port: request.port,
     };
-    let rx = Arc::clone(&mp).request_open(channel_id, endpoint).await?;
-    let result = match rx.await {
-        Ok(v) => v,
+    let channel_id = match mp.request_open(endpoint).await {
+        Ok(c) => c,
         Err(e) => {
-            tracing::error!("Cannot receive result from queue: {}", e);
+            tracing::error!(
+                "Cannot open channel {}:{}: {}",
+                request.addr,
+                request.port,
+                e
+            );
+            let response = socks::Response {
+                version: socks::Version::Socks5,
+                status: socks::Status::GeneralFailure,
+                addr: request.addr,
+                port: request.port,
+            };
+            tx_buffer.clear();
+            response.encode_into(&mut tx_buffer);
+            client.write_all(&tx_buffer[..]).await?;
             return Ok(());
         }
     };
-    if let Err(why) = result {
-        tracing::error!(
-            "Cannot open channel {}:{}: {}",
-            request.addr,
-            request.port,
-            why
-        );
-        let response = socks::Response {
-            version: socks::Version::Socks5,
-            status: socks::Status::GeneralFailure,
-            addr: request.addr,
-            port: request.port,
-        };
-        tx_buffer.clear();
-        response.encode_into(&mut tx_buffer);
-        client.write_all(&tx_buffer[..]).await?;
-        return Ok(());
-    }
 
     let response = socks::Response {
         version: socks::Version::Socks5,
@@ -100,15 +91,8 @@ async fn handshake(
     response.encode_into(&mut tx_buffer);
     client.write_all(&tx_buffer[..]).await?;
 
-    let mut channel = mp.create_channel_with_id(channel_id, Box::new(client) as Box<dyn Stream>)?;
+    let mut channel = mp.create_channel(client, channel_id)?;
     channel.pipe().await
-}
-
-async fn open_stream<C>(_: proto::Endpoint) -> OpenStreamResult<C> {
-    Err(Error::IO(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "No operation supported in client mode",
-    )))
 }
 
 #[tokio::main]
@@ -121,23 +105,23 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind(&args.bind_addr).await?;
     let stdio = Stdio::new();
-    let (mp, rx) = Multiplexer::create();
-    let next_channel_id = AtomicU64::new(0);
 
-    let mp_server = Arc::clone(&mp);
-    let my_open_stream = move |data| Box::pin(open_stream(data));
+    let (mp, server) = MultiplexerBuilder::<ModeClient, _>::new().build();
+    let mp = Arc::new(mp);
+
     tokio::spawn(async move {
-        let _ = mp_server.serve(stdio, rx, &my_open_stream).await;
+        if let Err(e) = server.serve(stdio).await {
+            tracing::error!("Server encountered error: {e}");
+        }
     });
 
     loop {
         let (client, addr) = listener.accept().await?;
         tracing::debug!("New connection from {}", &addr);
+
         let mp = Arc::clone(&mp);
-        let channel_id = next_channel_id.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
-            tracing::info!("New task for {} with ID {}", addr, channel_id);
-            if let Err(e) = handshake(mp, client, channel_id).await {
+            if let Err(e) = handle_client(mp, client).await {
                 tracing::error!("Error which client {}: {}", addr, e);
             }
         });

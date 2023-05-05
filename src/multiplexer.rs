@@ -3,23 +3,22 @@ use std::{
     fmt,
     future::Future,
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
 };
 
-use futures::{SinkExt, StreamExt};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
-    time,
 };
 
 use crate::{
-    proto::{Endpoint, Message, MessageStream, RawCustom, Request, Response, Wire},
-    ChannelId, Result,
+    proto::{Endpoint, Message, RawCustom, Response, Wire},
+    ChannelId, OpenStreamResult, Result, Stream,
 };
 
-/// Trait for AsyncRead + AsyncWrite objects
-pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin {}
+mod client;
+pub use client::MultiplexerClient;
+mod server;
+pub use server::MultiplexerServer;
 
 #[derive(Debug)]
 pub struct Config {
@@ -59,12 +58,8 @@ impl Default for Config {
     }
 }
 
-impl<T> Stream for T where T: AsyncWrite + AsyncRead + Send + Unpin {}
-
-type QueueValue<C> = oneshot::Sender<std::result::Result<Response<C>, String>>;
-
 /// Server part for the multiplexer
-pub struct Multiplexer<C = RawCustom> {
+pub(super) struct Multiplexer<C = RawCustom> {
     /// A mapping between a ChannelId (identifying a destination) and its Sender
     channels: RwLock<HashMap<ChannelId, mpsc::Sender<Vec<u8>>>>,
 
@@ -72,14 +67,14 @@ pub struct Multiplexer<C = RawCustom> {
     tx: mpsc::Sender<Message<C>>,
 
     /// Waiting responses
-    queue: Mutex<HashMap<ChannelId, QueueValue<C>>>,
+    queue: Mutex<HashMap<ChannelId, oneshot::Sender<Response>>>,
 
     /// Configuration
     config: Config,
 }
 
 /// A channel to interact with a single client
-pub struct Channel<C = RawCustom> {
+pub struct Channel<C> {
     /// It's identifier
     id: ChannelId,
 
@@ -93,13 +88,11 @@ pub struct Channel<C = RawCustom> {
     stream: Box<dyn Stream>,
 }
 
-pub type OpenStreamResult<C> = Result<(Box<dyn Stream>, Option<Endpoint<C>>)>;
-
 impl<C> Multiplexer<C>
 where
-    C: Wire + fmt::Display + fmt::Debug + Send + 'static,
+    C: Wire + fmt::Display + Send + 'static,
 {
-    pub fn create_channel_with_id(
+    pub(super) fn create_channel_with_id(
         &self,
         id: ChannelId,
         output: Box<dyn Stream>,
@@ -118,7 +111,7 @@ where
         })
     }
 
-    pub fn create_with_config(config: Config) -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
+    pub(super) fn create_with_config(config: Config) -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
         let (tx, rx) = mpsc::channel(config.channel_size);
         (
             Arc::new(Self {
@@ -131,90 +124,20 @@ where
         )
     }
 
-    pub fn create() -> (Arc<Self>, mpsc::Receiver<Message<C>>) {
-        let config = Config::default();
-        Self::create_with_config(config)
-    }
-
-    pub async fn serve<O, S, F>(
-        self: Arc<Self>,
-        stream: S,
-        mut rx: mpsc::Receiver<Message<C>>,
-        open_stream: &O,
-    ) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Send + Unpin,
-        O: Fn(Endpoint<C>) -> F,
-        F: Future<Output = OpenStreamResult<C>> + Send + Unpin,
-    {
-        let mut message_stream = MessageStream::<C, _>::new(stream);
-
-        let sleep_duration;
-        #[cfg(feature = "heartbeat")]
-        {
-            sleep_duration = self.config.heartbeat;
-        }
-        #[cfg(not(feature = "heartbeat"))]
-        {
-            sleep_duration = 60;
-        }
-
-        loop {
-            let sleep = time::sleep(Duration::from_secs(sleep_duration));
-            tokio::pin!(sleep);
-
-            tokio::select! {
-                maybe_msg = message_stream.next() => {
-                    match maybe_msg {
-                        Some(msg) => {
-                            tracing::trace!("Received {msg} from stream");
-                            let me = Arc::clone(&self);
-                            me.dispatch_message(msg, open_stream).await?;
-                        },
-                        None => {
-                            tracing::info!("Stream has ended");
-                            break;
-                        }
-                    }
-                },
-                maybe_msg = rx.recv() => {
-                    match maybe_msg {
-                        Some(msg) => {
-                            tracing::trace!("Sending  {msg} to stream");
-                            message_stream.send(msg).await?;
-                        },
-                        None => {
-                            tracing::info!("No more message to be received");
-                            break;
-                        }
-                    }
-                },
-                _ = &mut sleep => {
-                    #[cfg(feature = "heartbeat")]
-                    {
-                        let msg = crate::proto::Message::<C>::Ping(self.config.get_next_id());
-                        tracing::trace!("Sending  {msg} to stream (heartbeat)");
-                        message_stream.send(msg).await?;
-                    }
-                    message_stream.flush().await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn dispatch_message<O, F>(
+    pub(super) async fn dispatch_message<O, F>(
         self: Arc<Self>,
         message: Message<C>,
         open_stream: &O,
     ) -> Result<()>
     where
         O: Fn(Endpoint<C>) -> F,
-        F: Future<Output = OpenStreamResult<C>> + Send + Unpin,
+        F: Future<Output = OpenStreamResult> + Send + Unpin,
     {
         match message {
-            Message::Request(r) => self.dispatch_request(r, open_stream).await,
+            Message::RequestOpen {
+                channel_id,
+                endpoint,
+            } => self.dispatch_open(channel_id, endpoint, open_stream).await,
             Message::Response(r) => self.dispatch_response(r).await,
             Message::Data { channel_id, data } => {
                 let tx = {
@@ -257,52 +180,27 @@ where
         }
     }
 
-    async fn send(&self, msg: impl Into<Message<C>>) -> Result<()> {
+    pub(super) async fn send(&self, msg: impl Into<Message<C>>) -> Result<()> {
         if let Err(e) = self.tx.send(msg.into()).await {
-            tracing::error!("Could not send {e:?} to remote");
+            tracing::error!("Could not send {e} to remote");
             Err(e.into())
         } else {
             Ok(())
         }
     }
 
-    async fn dispatch_response(self: Arc<Self>, response: Response<C>) -> Result<()> {
-        let (channel_id, result) = match response {
-            Response::Error {
-                channel_id,
-                message,
-            } => {
-                tracing::debug!("Channel {channel_id} reported an error");
-                (channel_id, Err(message))
-            }
-            Response::New {
-                channel_id,
-                endpoint,
-            } => {
-                tracing::debug!("Channel {channel_id} has been opened remotely");
-                (
-                    channel_id,
-                    Ok(Response::New {
-                        channel_id,
-                        endpoint,
-                    }),
-                )
-            }
-            Response::Close { channel_id } => {
-                tracing::debug!("Channel {channel_id} has been closed remotely");
-                (channel_id, Ok(response))
-            }
-        };
+    async fn dispatch_response(self: Arc<Self>, response: Response) -> Result<()> {
+        let channel_id = response.get_channel_id();
         let maybe_tx = {
             let mut queue = self.queue.lock()?;
             queue.remove(&channel_id)
         };
 
-        // Gor error on channel, if already present sends EOF into it
-        if result.is_err() {
+        // Gor error on channel, close it
+        if let Response::Error { .. } = response {
             let maybe_tx = {
-                let channels = self.channels.read()?;
-                channels.get(&channel_id).cloned()
+                let mut channels = self.channels.write()?;
+                channels.remove(&channel_id)
             };
             if let Some(tx) = maybe_tx {
                 tracing::debug!("Sending EOF to channel {channel_id}");
@@ -311,7 +209,7 @@ where
         }
 
         if let Some(tx) = maybe_tx {
-            if let Err(e) = tx.send(result) {
+            if let Err(e) = tx.send(response) {
                 tracing::error!("Could send back result on channel {channel_id}: {e:?}");
             }
         } else {
@@ -321,95 +219,51 @@ where
         Ok(())
     }
 
-    async fn dispatch_request<F, O>(
+    async fn dispatch_open<F, O>(
         self: Arc<Self>,
-        request: Request<C>,
+        channel_id: ChannelId,
+        endpoint: Endpoint<C>,
         open_stream: &O,
     ) -> Result<()>
     where
         O: Fn(Endpoint<C>) -> F,
-        F: Future<Output = OpenStreamResult<C>> + Send + Unpin,
+        F: Future<Output = OpenStreamResult> + Send + Unpin,
     {
-        match request {
-            Request::New {
-                channel_id,
-                endpoint,
-            } => {
-                tracing::debug!("Request open channel#{channel_id} on {endpoint}");
-                match open_stream(endpoint).await {
-                    Ok((stream, peer_endpoint)) => {
-                        let mut channel = self.create_channel_with_id(channel_id, stream)?;
-                        self.send(Response::New {
-                            channel_id,
-                            endpoint: peer_endpoint,
-                        })
-                        .await?;
-                        tokio::spawn(async move {
-                            if let Err(e) = channel.pipe().await {
-                                tracing::error!("Error wich channel {channel_id}: {e}");
-                            }
-                        });
+        tracing::debug!("Request open channel#{channel_id} on {endpoint}");
+        match open_stream(endpoint).await {
+            Ok(stream) => {
+                let mut channel = self.create_channel_with_id(channel_id, stream)?;
+                self.send(Response::Open { channel_id }).await?;
+                tokio::spawn(async move {
+                    if let Err(e) = channel.pipe().await {
+                        tracing::error!("Error wich channel {channel_id}: {e}");
                     }
-                    Err(e) => {
-                        self.send(Response::Error {
-                            channel_id,
-                            message: format!("{e}"),
-                        })
-                        .await?;
-                    }
-                }
+                });
             }
-            Request::Close { channel_id } => {
-                let maybe_tx = {
-                    let mut channels = self.channels.write()?;
-                    channels.remove(&channel_id).map(|_| ())
-                };
-                if maybe_tx.is_some() {
-                    tracing::debug!("Closing channel {channel_id}");
-                    self.send(Response::Close { channel_id }).await?;
-                } else {
-                    tracing::debug!("Closing unexisting channel {channel_id}");
-                    self.send((channel_id, format!("Unknown channel ID {channel_id}")))
-                        .await?;
-                }
+            Err(e) => {
+                self.send(Response::Error {
+                    channel_id,
+                    message: format!("{e}"),
+                })
+                .await?;
             }
         }
 
         Ok(())
     }
 
-    pub async fn request_close(
-        self: Arc<Self>,
-        channel_id: ChannelId,
-    ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
-        tracing::debug!("Requesting closing of channel {channel_id} remotely");
-        let req = Request::Close { channel_id };
-        self.request(req).await
-    }
-
     pub async fn request_open(
         self: Arc<Self>,
         channel_id: ChannelId,
         endpoint: Endpoint<C>,
-    ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
-        tracing::debug!("Requesting opening of new channel {channel_id} remotely");
-        let req = Request::New {
+    ) -> Result<oneshot::Receiver<Response>> {
+        tracing::debug!("Requesting opening of new channel {channel_id} remotely to {endpoint}");
+        let (tx, rx) = oneshot::channel();
+        self.send(Message::RequestOpen {
             channel_id,
             endpoint,
-        };
-        self.request(req).await
-    }
-
-    async fn request(
-        self: Arc<Self>,
-        request: Request<C>,
-    ) -> Result<oneshot::Receiver<std::result::Result<Response<C>, String>>> {
-        let channel_id = match request {
-            Request::New { channel_id, .. } => channel_id,
-            Request::Close { channel_id } => channel_id,
-        };
-        let (tx, rx) = oneshot::channel();
-        self.send(request).await?;
+        })
+        .await?;
         {
             let mut queue = self.queue.lock()?;
             queue.insert(channel_id, tx);
@@ -418,10 +272,7 @@ where
     }
 }
 
-impl<C> Channel<C>
-where
-    C: Wire + std::fmt::Display,
-{
+impl<C> Channel<C> {
     pub async fn pipe(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
 

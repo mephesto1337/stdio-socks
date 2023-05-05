@@ -1,19 +1,8 @@
-use futures::{Sink, Stream};
 use nom::{
-    combinator::{map, map_opt},
+    combinator::{map, map_opt, rest},
     error::context,
-    multi::length_data,
-    number::streaming::{be_u32, be_u8},
-    Offset,
+    number::streaming::be_u8,
 };
-use pin_project::pin_project;
-use std::{
-    io,
-    marker::PhantomData,
-    pin::Pin,
-    task::{ready, Context, Poll},
-};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ChannelId;
 
@@ -41,8 +30,6 @@ pub trait Wire: Sized {
 impl Wire for String {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
         let data = self.as_bytes();
-        let data_len: u32 = data.len().try_into().expect("Name too long");
-        buffer.extend_from_slice(&data_len.to_be_bytes()[..]);
         buffer.extend_from_slice(data);
     }
 
@@ -52,28 +39,10 @@ impl Wire for String {
     {
         context(
             "String",
-            map_opt(length_data(be_u32), |bytes: &[u8]| {
+            map_opt(rest, |bytes: &[u8]| {
                 std::str::from_utf8(bytes).ok().map(|s| s.to_owned())
             }),
         )(buffer)
-    }
-}
-
-impl Wire for Vec<u8> {
-    fn encode_into(&self, buffer: &mut Vec<u8>) {
-        let size: u32 = self
-            .len()
-            .try_into()
-            .expect("Vec's length does not fit into u32");
-        buffer.extend_from_slice(&size.to_be_bytes()[..]);
-        buffer.extend_from_slice(&self[..]);
-    }
-
-    fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
-    where
-        E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
-    {
-        context("Vec", map(length_data(be_u32), |data: &[u8]| data.to_vec()))(buffer)
     }
 }
 
@@ -110,24 +79,20 @@ where
 mod address;
 mod endpoint;
 mod message;
+mod packet;
 mod request;
 mod response;
 
 pub use address::Address;
 pub use endpoint::{Endpoint, RawCustom};
 pub use message::Message;
+pub use packet::PacketCodec;
 pub use request::Request;
 pub use response::Response;
 
-impl<C> From<Response<C>> for Message<C> {
-    fn from(r: Response<C>) -> Self {
+impl<C> From<Response> for Message<C> {
+    fn from(r: Response) -> Self {
         Self::Response(r)
-    }
-}
-
-impl<C> From<Request<C>> for Message<C> {
-    fn from(r: Request<C>) -> Self {
-        Self::Request(r)
     }
 }
 
@@ -145,171 +110,5 @@ impl<C> From<(ChannelId, String)> for Message<C> {
             channel_id,
             message,
         })
-    }
-}
-
-/// A struct that implements [`futures::Stream`] and [`futures::Sink`] for Item = [`Message`]
-/// It internally uses a [`tokio::io::BufStream`]
-#[pin_project]
-pub struct MessageStream<C, S> {
-    #[pin]
-    inner: S,
-    tx_buffer: Vec<u8>,
-    tx_offset: usize,
-    rx_buffer: Vec<u8>,
-    rx_offset: usize,
-    _type: PhantomData<C>,
-}
-
-impl<C, S> MessageStream<C, S>
-where
-    S: AsyncRead + AsyncWrite,
-{
-    pub fn new(stream: S) -> Self {
-        Self {
-            inner: stream,
-            rx_buffer: Vec::new(),
-            tx_offset: 0,
-            tx_buffer: Vec::new(),
-            rx_offset: 0,
-            _type: PhantomData,
-        }
-    }
-}
-
-enum MessageStreamResult<C> {
-    Ok(Message<C>),
-    Incomplete(nom::Needed),
-    Err(nom::error::VerboseError<Vec<u8>>),
-}
-
-impl<C, S> MessageStream<C, S>
-where
-    C: Wire + std::fmt::Display,
-{
-    fn move_to_start(buffer: &mut Vec<u8>, offset: &mut usize) {
-        if *offset < 2048 {
-            return;
-        }
-
-        // If all data is consummed, just clear everything
-        if *offset == buffer.len() {
-            buffer.clear();
-            *offset = 0;
-            return;
-        }
-
-        let destination = buffer.as_mut_ptr();
-        let size = buffer[*offset..].len();
-        let source = buffer[*offset..].as_ptr();
-        *offset = 0;
-
-        unsafe {
-            std::intrinsics::copy(source, destination, size);
-            buffer.set_len(size);
-        }
-    }
-
-    fn get_buffered_next(buffer: &mut Vec<u8>, offset: &mut usize) -> MessageStreamResult<C> {
-        match Message::<C>::decode_verbose(&buffer[*offset..]) {
-            Ok((rest, msg)) => {
-                let size = buffer[*offset..].offset(rest);
-                tracing::trace!("Received {size} bytes message: {msg}");
-                *offset += size;
-                Self::move_to_start(buffer, offset);
-                MessageStreamResult::Ok(msg)
-            }
-            Err(ne) => match crate::error::nom_to_owned(ne) {
-                nom::Err::Incomplete(n) => MessageStreamResult::Incomplete(n),
-                nom::Err::Error(e) => MessageStreamResult::Err(e),
-                nom::Err::Failure(e) => MessageStreamResult::Err(e),
-            },
-        }
-    }
-}
-
-impl<C, S> Stream for MessageStream<C, S>
-where
-    C: Wire + std::fmt::Display,
-    S: AsyncRead,
-{
-    type Item = Message<C>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut project = self.project();
-        loop {
-            match Self::get_buffered_next(project.rx_buffer, project.rx_offset) {
-                MessageStreamResult::Ok(m) => return Poll::Ready(Some(m)),
-                MessageStreamResult::Incomplete(n) => {
-                    let size = match n {
-                        nom::Needed::Unknown => 0,
-                        nom::Needed::Size(s) => s.get(),
-                    }
-                    .max(1024);
-                    project.rx_buffer.reserve(size);
-                    let mut read_buf = ReadBuf::uninit(project.rx_buffer.spare_capacity_mut());
-                    if let Err(e) = ready!(project.inner.as_mut().poll_read(cx, &mut read_buf)) {
-                        tracing::error!("Got underlying IO error: {e}");
-                        return Poll::Ready(None);
-                    }
-                    let n = read_buf.filled().len();
-                    tracing::trace!("Read {n} bytes from underlying stream");
-                    if n == 0 {
-                        // EOF
-                        return Poll::Ready(None);
-                    } else {
-                        let new_len = project.rx_buffer.len() + n;
-                        unsafe { project.rx_buffer.set_len(new_len) };
-
-                        // next loop, rety to parse
-                    }
-                }
-                MessageStreamResult::Err(e) => {
-                    tracing::error!("Got parsing error: {e:?}");
-                    return Poll::Ready(None);
-                }
-            }
-        }
-    }
-}
-
-impl<C, S> Sink<Message<C>> for MessageStream<C, S>
-where
-    C: Wire + std::fmt::Display,
-    S: AsyncWrite,
-{
-    type Error = io::Error;
-
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: Message<C>) -> Result<(), Self::Error> {
-        let project = self.project();
-        tracing::trace!("Will send {item} to stream");
-        item.encode_into(project.tx_buffer);
-        Ok(())
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let mut project = self.project();
-        loop {
-            let buf = &project.tx_buffer[*project.tx_offset..];
-            if buf.is_empty() {
-                Self::move_to_start(project.tx_buffer, project.tx_offset);
-                return project.inner.as_mut().poll_flush(cx);
-            }
-            match ready!(project.inner.as_mut().poll_write(cx, buf)) {
-                Ok(n) => {
-                    tracing::trace!("Wrote {n} bytes to underlying stream");
-                    *project.tx_offset += n;
-                }
-                Err(e) => return Poll::Ready(Err(e)),
-            }
-        }
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.project().inner.poll_shutdown(cx)
     }
 }

@@ -1,27 +1,26 @@
-use std::{fmt, mem::size_of};
+use std::fmt;
 
 use crate::ChannelId;
 
-use super::{endpoint::RawCustom, request::Request, response::Response, Wire};
-
-#[cfg(debug_assertions)]
-use nom::bytes::streaming::tag;
+use super::{endpoint::RawCustom, response::Response, Endpoint, Wire};
 
 use nom::{
-    combinator::map,
+    combinator::{map, rest},
     error::context,
-    multi::length_value,
-    number::streaming::{be_u32, be_u64, be_u8},
+    number::streaming::{be_u64, be_u8},
     sequence::tuple,
 };
 
 /// Messages that can be exchanged
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message<C = RawCustom> {
-    /// A request message
-    Request(Request<C>),
+    /// A request to open a new channel
+    RequestOpen {
+        channel_id: ChannelId,
+        endpoint: Endpoint<C>,
+    },
     /// A response message
-    Response(Response<C>),
+    Response(Response),
     /// Data between 2 endpoints
     Data {
         channel_id: ChannelId,
@@ -34,9 +33,7 @@ pub enum Message<C = RawCustom> {
     /// Ping to keep stream open, ping reply
     Pong(u64),
 }
-#[cfg(debug_assertions)]
-const MESSAGE_TAG: &[u8; 8] = b"multiplx";
-const MESSAGE_TYPE_REQUEST: u8 = 1;
+const MESSAGE_TYPE_REQUEST_OPEN: u8 = 1;
 const MESSAGE_TYPE_RESPONSE: u8 = 2;
 const MESSAGE_TYPE_DATA: u8 = 3;
 #[cfg(feature = "heartbeat")]
@@ -49,18 +46,27 @@ where
     E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     C: Wire,
 {
-    let (rest, message_type) = be_u8(buffer)?;
+    let (input, message_type) = be_u8(buffer)?;
 
     match message_type {
-        MESSAGE_TYPE_REQUEST => map(Request::<C>::decode, Message::Request)(rest),
-        MESSAGE_TYPE_RESPONSE => map(Response::<C>::decode, Message::Response)(rest),
-        MESSAGE_TYPE_DATA => map(tuple((be_u64, Vec::decode)), |(channel_id, data)| {
-            Message::Data { channel_id, data }
-        })(rest),
+        MESSAGE_TYPE_REQUEST_OPEN => map(
+            tuple((be_u64, Endpoint::<C>::decode)),
+            |(channel_id, endpoint)| Message::RequestOpen {
+                channel_id,
+                endpoint,
+            },
+        )(input),
+        MESSAGE_TYPE_RESPONSE => map(Response::decode, Message::Response)(input),
+        MESSAGE_TYPE_DATA => map(tuple((be_u64, rest)), |(channel_id, data): (_, &[u8])| {
+            Message::Data {
+                channel_id,
+                data: data.to_vec(),
+            }
+        })(input),
         #[cfg(feature = "heartbeat")]
-        MESSAGE_TYPE_PING => map(be_u64, Message::<C>::Ping)(rest),
+        MESSAGE_TYPE_PING => map(be_u64, Message::<C>::Ping)(input),
         #[cfg(feature = "heartbeat")]
-        MESSAGE_TYPE_PONG => map(be_u64, Message::<C>::Pong)(rest),
+        MESSAGE_TYPE_PONG => map(be_u64, Message::<C>::Pong)(input),
         _ => Err(nom::Err::Failure(E::add_context(
             buffer,
             "Invalid message type",
@@ -74,19 +80,14 @@ where
     C: Wire,
 {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
-        #[cfg(debug_assertions)]
-        {
-            buffer.extend_from_slice(MESSAGE_TAG);
-        }
-
-        let size_offset = buffer.len();
-        buffer.extend_from_slice(&[0u8; size_of::<u32>()][..]);
-
-        let old_size = buffer.len();
         match self {
-            Self::Request(ref request) => {
-                buffer.push(MESSAGE_TYPE_REQUEST);
-                request.encode_into(buffer);
+            Self::RequestOpen {
+                channel_id,
+                ref endpoint,
+            } => {
+                buffer.push(MESSAGE_TYPE_REQUEST_OPEN);
+                buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
+                endpoint.encode_into(buffer);
             }
             Self::Response(ref response) => {
                 buffer.push(MESSAGE_TYPE_RESPONSE);
@@ -98,7 +99,7 @@ where
             } => {
                 buffer.push(MESSAGE_TYPE_DATA);
                 buffer.extend_from_slice(&channel_id.to_be_bytes()[..]);
-                data.encode_into(buffer);
+                buffer.extend_from_slice(data);
             }
             #[cfg(feature = "heartbeat")]
             Self::Ping(id) => {
@@ -111,28 +112,13 @@ where
                 buffer.extend_from_slice(&id.to_be_bytes()[..]);
             }
         }
-        let new_size = buffer.len();
-
-        let message_size: u32 = (new_size - old_size).try_into().unwrap();
-        buffer[size_offset..][..size_of::<u32>()].copy_from_slice(&message_size.to_be_bytes()[..]);
     }
 
     fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        #[cfg(debug_assertions)]
-        {
-            context(
-                "Message",
-                nom::sequence::preceded(tag(&MESSAGE_TAG[..]), length_value(be_u32, parse_message)),
-            )(buffer)
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            context("Message", length_value(be_u32, parse_message))(buffer)
-        }
+        context("Message", parse_message)(buffer)
     }
 }
 
@@ -142,8 +128,14 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Request(ref r) => fmt::Display::fmt(r, f),
-            Self::Response(ref r) => fmt::Display::fmt(r, f),
+            Self::RequestOpen {
+                channel_id,
+                endpoint,
+            } => write!(
+                f,
+                "RequestOpen {{ channel_id: {channel_id}, endpoint: {endpoint} }}"
+            ),
+            Self::Response(r) => fmt::Display::fmt(r, f),
             Self::Data {
                 channel_id,
                 data: ref buffer,
