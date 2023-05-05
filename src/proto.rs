@@ -2,7 +2,7 @@
 //!
 //!
 use nom::{
-    combinator::{map, map_opt, rest},
+    combinator::{map, map_opt},
     error::context,
     multi::{length_count, length_data},
     number::complete::{be_u32, be_u8},
@@ -47,7 +47,7 @@ impl Wire for String {
     {
         context(
             "String",
-            map_opt(rest, |bytes: &[u8]| {
+            map_opt(length_data(be_u32), |bytes: &[u8]| {
                 std::str::from_utf8(bytes).ok().map(|s| s.to_owned())
             }),
         )(buffer)
