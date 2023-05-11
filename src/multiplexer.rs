@@ -343,7 +343,11 @@ impl<C> Channel<C, MemoryStream> {
         self,
         mut stream: Box<dyn Stream>,
     ) -> std::io::Result<Channel<C, Box<dyn Stream>>> {
-        stream.write_all(self.stream.get_data()).await?;
+        let data = self.stream.get_data();
+        if !data.is_empty() {
+            tracing::trace!("Wrote {n} buffered bytes to stream", n = data.len());
+        }
+        stream.write_all(data).await?;
         Ok(Channel {
             id: self.id,
             tx: self.tx,
