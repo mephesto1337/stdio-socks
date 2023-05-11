@@ -275,6 +275,12 @@ where
     }
 }
 
+impl<C, S> Channel<C, S> {
+    /// Get channel's id
+    pub fn id(&self) -> ChannelId {
+        self.id
+    }
+}
 impl<C> Channel<C, Box<dyn Stream>> {
     /// Equivalent of [`tokio::io::copy_bidirectional`] for channels
     pub async fn pipe(mut self) -> Result<()> {
