@@ -8,8 +8,9 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
+    multiplexer::MemoryStream,
     proto::{self, RawCustom, Wire},
-    Channel, ChannelId, Result, Stream,
+    Channel, ChannelId, Result,
 };
 
 /// Multiplexer client
@@ -29,8 +30,14 @@ where
 
     /// Request remote end to open a channel with the given endpoint. Returns the id chosen for
     /// both ends.
-    pub async fn request_open(&self, endpoint: proto::Endpoint<C>) -> Result<ChannelId> {
+    pub async fn request_open(
+        &self,
+        endpoint: proto::Endpoint<C>,
+    ) -> Result<Channel<C, MemoryStream>> {
         let channel_id = self.channel_id.fetch_add(1, Ordering::Relaxed);
+        let channel = self
+            .mp
+            .create_channel_with_id(channel_id, MemoryStream::default())?;
         let rx = self
             .get_new_multiplexer()
             .request_open(channel_id, endpoint)
@@ -42,7 +49,7 @@ where
         {
             proto::Response::Open { channel_id } => {
                 tracing::debug!("Remote opened channel#{channel_id}");
-                Ok(channel_id)
+                Ok(channel)
             }
             proto::Response::Error {
                 channel_id,
@@ -64,13 +71,13 @@ where
     /// let mut channel = client.create_channel(stream, channel_id).unwrap();
     /// channel.pipe().await.unwrap();
     /// ```
-    pub fn create_channel<S>(&self, stream: S, channel_id: ChannelId) -> Result<Channel<C>>
+    pub fn create_channel<S>(&self, channel_id: ChannelId) -> Result<Channel<C, MemoryStream>>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let channel = self
             .mp
-            .create_channel_with_id(channel_id, Box::new(stream) as Box<dyn Stream>)?;
+            .create_channel_with_id(channel_id, MemoryStream::default())?;
         Ok(channel)
     }
 }

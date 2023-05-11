@@ -60,7 +60,7 @@ async fn handle_client(mp: Arc<MultiplexerClient>, mut client: TcpStream) -> Res
         address,
         port: request.port,
     };
-    let channel_id = match mp.request_open(endpoint).await {
+    let channel = match mp.request_open(endpoint).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(
@@ -92,7 +92,7 @@ async fn handle_client(mp: Arc<MultiplexerClient>, mut client: TcpStream) -> Res
     response.encode_into(&mut tx_buffer);
     client.write_all(&tx_buffer[..]).await?;
 
-    let mut channel = mp.create_channel(client, channel_id)?;
+    let channel = channel.replace_stream(client).await?;
     channel.pipe().await
 }
 

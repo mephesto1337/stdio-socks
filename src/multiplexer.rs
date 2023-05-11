@@ -6,7 +6,7 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, oneshot},
 };
 
@@ -19,6 +19,8 @@ mod client;
 pub use client::MultiplexerClient;
 mod server;
 pub use server::MultiplexerServer;
+mod memory_stream;
+pub use memory_stream::MemoryStream;
 
 /// Configuration to use in a multiplex session
 #[derive(Debug)]
@@ -75,7 +77,7 @@ pub(super) struct Multiplexer<C = RawCustom> {
 }
 
 /// A channel to interact with a single client
-pub struct Channel<C> {
+pub struct Channel<C, S> {
     /// It's identifier
     id: ChannelId,
 
@@ -86,18 +88,18 @@ pub struct Channel<C> {
     rx: mpsc::Receiver<Vec<u8>>,
 
     /// Stream associated
-    stream: Box<dyn Stream>,
+    stream: S,
 }
 
 impl<C> Multiplexer<C>
 where
     C: Wire + fmt::Display + Send + 'static,
 {
-    pub(super) fn create_channel_with_id(
+    pub(super) fn create_channel_with_id<S>(
         &self,
         id: ChannelId,
-        output: Box<dyn Stream>,
-    ) -> Result<Channel<C>> {
+        output: S,
+    ) -> Result<Channel<C, S>> {
         let (tx, rx) = mpsc::channel(self.config.channel_size);
         {
             let mut channels = self.channels.write()?;
@@ -233,7 +235,7 @@ where
         tracing::debug!("Request open channel#{channel_id} on {endpoint}");
         match open_stream(endpoint).await {
             Ok(stream) => {
-                let mut channel = self.create_channel_with_id(channel_id, stream)?;
+                let channel = self.create_channel_with_id(channel_id, stream)?;
                 self.send(Response::Open { channel_id }).await?;
                 tokio::spawn(async move {
                     if let Err(e) = channel.pipe().await {
@@ -273,9 +275,9 @@ where
     }
 }
 
-impl<C> Channel<C> {
+impl<C> Channel<C, Box<dyn Stream>> {
     /// Equivalent of [`tokio::io::copy_bidirectional`] for channels
-    pub async fn pipe(&mut self) -> Result<()> {
+    pub async fn pipe(mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
 
         loop {
@@ -320,8 +322,27 @@ impl<C> Channel<C> {
     }
 }
 
-impl<C> Drop for Channel<C> {
-    fn drop(&mut self) {
-        tracing::debug!("Dropping channel {id}", id = self.id);
+impl<C> Channel<C, MemoryStream> {
+    /// Replace memory stream of channel with actual stream (NOT already boxed)
+    pub async fn replace_stream<S>(self, stream: S) -> std::io::Result<Channel<C, Box<dyn Stream>>>
+    where
+        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
+    {
+        self.replace_stream_boxed(Box::new(stream) as Box<dyn Stream>)
+            .await
+    }
+
+    /// Replace memory stream of channel with actual stream
+    pub async fn replace_stream_boxed(
+        self,
+        mut stream: Box<dyn Stream>,
+    ) -> std::io::Result<Channel<C, Box<dyn Stream>>> {
+        stream.write_all(self.stream.get_data()).await?;
+        Ok(Channel {
+            id: self.id,
+            tx: self.tx,
+            rx: self.rx,
+            stream,
+        })
     }
 }
