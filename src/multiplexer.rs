@@ -12,15 +12,13 @@ use tokio::{
 
 use crate::{
     proto::{Endpoint, Message, RawCustom, Response, Wire},
-    ChannelId, OpenStreamResult, Result, Stream,
+    ChannelId, OpenStreamResult, Result,
 };
 
 mod client;
 pub use client::MultiplexerClient;
 mod server;
 pub use server::MultiplexerServer;
-mod memory_stream;
-pub use memory_stream::MemoryStream;
 
 /// Configuration to use in a multiplex session
 #[derive(Debug)]
@@ -281,7 +279,10 @@ impl<C, S> Channel<C, S> {
         self.id
     }
 }
-impl<C> Channel<C, Box<dyn Stream>> {
+impl<C, S> Channel<C, S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     /// Equivalent of [`tokio::io::copy_bidirectional`] for channels
     pub async fn pipe(mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
@@ -328,31 +329,17 @@ impl<C> Channel<C, Box<dyn Stream>> {
     }
 }
 
-impl<C> Channel<C, MemoryStream> {
+impl<C> Channel<C, ()> {
     /// Replace memory stream of channel with actual stream (NOT already boxed)
-    pub async fn replace_stream<S>(self, stream: S) -> std::io::Result<Channel<C, Box<dyn Stream>>>
+    pub fn replace_stream<S>(self, stream: S) -> Channel<C, S>
     where
         S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
     {
-        self.replace_stream_boxed(Box::new(stream) as Box<dyn Stream>)
-            .await
-    }
-
-    /// Replace memory stream of channel with actual stream
-    pub async fn replace_stream_boxed(
-        self,
-        mut stream: Box<dyn Stream>,
-    ) -> std::io::Result<Channel<C, Box<dyn Stream>>> {
-        let data = self.stream.get_data();
-        if !data.is_empty() {
-            tracing::trace!("Wrote {n} buffered bytes to stream", n = data.len());
-        }
-        stream.write_all(data).await?;
-        Ok(Channel {
+        Channel {
             id: self.id,
             tx: self.tx,
             rx: self.rx,
             stream,
-        })
+        }
     }
 }

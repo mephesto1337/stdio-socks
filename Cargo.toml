@@ -1,6 +1,6 @@
 [package]
 name = "multiplex"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 [features]
@@ -11,9 +11,10 @@ heartbeat = []
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt", "io-util", "io-std", "time", "sync", "macros"] }
 nom = "7"
 tracing = { version = "0.1", features = ["log"] }
 tokio-util = { version = "0.7", features = ["codec"] }

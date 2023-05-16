@@ -27,10 +27,10 @@
 //!             let endpoint: Endpoint = addr.into();
 //!
 //!             // Request remote to open channel
-//!             let channel_id = client.request_open(endpoint).await.unwrap();
+//!             let channel = client.request_open(endpoint).await.unwrap();
 //!
-//!             // Creates our local channel associate with the TcpStream `s`
-//!             let mut channel = client.create_channel(s, channel_id).unwrap();
+//!             // Put our stream into the channel
+//!             let channel = channel.replace_stream(s);
 //!
 //!             // equivalent of tokio::io::copy_bidirectionnal
 //!             channel.pipe().await.unwrap();

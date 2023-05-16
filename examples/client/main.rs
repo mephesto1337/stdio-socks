@@ -92,7 +92,7 @@ async fn handle_client(mp: Arc<MultiplexerClient>, mut client: TcpStream) -> Res
     response.encode_into(&mut tx_buffer);
     client.write_all(&tx_buffer[..]).await?;
 
-    let channel = channel.replace_stream(client).await?;
+    let channel = channel.replace_stream(client);
     channel.pipe().await
 }
 
