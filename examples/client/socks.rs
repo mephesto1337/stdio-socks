@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::streaming::take;
 use nom::combinator::{map, map_opt, verify};
 use nom::error::context;
-use nom::multi::count;
+use nom::multi::length_count;
 use nom::number::streaming::{be_u16, be_u8};
 use nom::sequence::{preceded, tuple};
 
@@ -35,17 +35,27 @@ impl Wire for Version {
     }
 }
 
-#[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum AuthenticationMethod {
-    None = 0,
-    // UsernamePassword = 2,
-    NotAcceptable = 0xff,
+    None,
+    GssApi,
+    UsernamePassword,
+    IanaAssigned(u8),
+    PrivateMethod(u8),
+    NotAcceptable,
 }
 
 impl Wire for AuthenticationMethod {
     fn encode_into(&self, buffer: &mut Vec<u8>) {
-        buffer.push(*self as u8);
+        let val = match self {
+            Self::None => 0,
+            Self::GssApi => 1,
+            Self::UsernamePassword => 2,
+            Self::IanaAssigned(v) => *v,
+            Self::PrivateMethod(v) => *v,
+            Self::NotAcceptable => 0xff,
+        };
+        buffer.push(val);
     }
 
     fn decode<'i, E>(buffer: &'i [u8]) -> nom::IResult<&'i [u8], Self, E>
@@ -53,13 +63,20 @@ impl Wire for AuthenticationMethod {
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
         context(
-            "SocksVersion",
-            alt((
-                map(verify(be_u8, |b| *b == Self::None as u8), |_| Self::None),
-                map(verify(be_u8, |b| *b == Self::NotAcceptable as u8), |_| {
-                    Self::NotAcceptable
-                }),
-            )),
+            "AuthenticationMethod",
+            map(be_u8, |v| match v {
+                0 => Self::None,
+                1 => Self::GssApi,
+                2 => Self::UsernamePassword,
+                0xff => Self::NotAcceptable,
+                v => {
+                    if v <= 0x7f {
+                        Self::IanaAssigned(v)
+                    } else {
+                        Self::PrivateMethod(v)
+                    }
+                }
+            }),
         )(buffer)
     }
 }
@@ -87,9 +104,16 @@ impl Wire for Hello {
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        let (rest, (version, nmethods)) = tuple((Version::decode, be_u8))(buffer)?;
-        let (rest, methods) = count(AuthenticationMethod::decode, nmethods as usize)(rest)?;
-        Ok((rest, Self { methods, version }))
+        context(
+            "Hello",
+            map(
+                tuple((
+                    Version::decode,
+                    length_count(be_u8, AuthenticationMethod::decode),
+                )),
+                |(version, methods)| Self { version, methods },
+            ),
+        )(buffer)
     }
 }
 
@@ -119,6 +143,8 @@ impl Wire for HelloResponse {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Command {
     Connect = 1,
+    Bind = 2,
+    UdpAssociate = 3,
 }
 
 impl Wire for Command {
@@ -130,12 +156,16 @@ impl Wire for Command {
     where
         E: nom::error::ParseError<&'i [u8]> + nom::error::ContextError<&'i [u8]>,
     {
-        context(
-            "Socks command",
-            map(verify(be_u8, |b| *b == Self::Connect as u8), |_| {
-                Self::Connect
-            }),
-        )(buffer)
+        let (rest, cmd) = context("Socks command", be_u8)(buffer)?;
+        match cmd {
+            1 => Ok((rest, Self::Connect)),
+            2 => Ok((rest, Self::Bind)),
+            3 => Ok((rest, Self::UdpAssociate)),
+            _ => Err(nom::Err::Failure(nom::error::make_error(
+                buffer,
+                nom::error::ErrorKind::NoneOf,
+            ))),
+        }
     }
 }
 
@@ -188,18 +218,12 @@ impl Wire for AddressType {
         context(
             "Socks address",
             alt((
-                preceded(
-                    verify(be_u8, |b| *b == 1),
-                    map(decode_ipv4, |ip4| Self::IPv4(ip4)),
-                ),
+                preceded(verify(be_u8, |b| *b == 1), map(decode_ipv4, Self::IPv4)),
                 preceded(
                     verify(be_u8, |b| *b == 3),
-                    map(decode_hostname, |name| Self::DomainName(name)),
+                    map(decode_hostname, Self::DomainName),
                 ),
-                preceded(
-                    verify(be_u8, |b| *b == 4),
-                    map(decode_ipv6, |ip6| Self::IPv6(ip6)),
-                ),
+                preceded(verify(be_u8, |b| *b == 4), map(decode_ipv6, Self::IPv6)),
             )),
         )(buffer)
     }
