@@ -21,6 +21,50 @@ If the server denies dynamic forward (`AllowTcpForwarding no` or
    ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:1337 %h %p' $INTERNAL_IP
    ```
 
+
+## Got only one reverse and want to multiplex ?
+
+1. Upload the [server example](./examples/server.rs) on the victim system.
+   ```console
+   local$ gzip -9c server | base64 | tmux load-buffer -
+   remote$ cat > server.64
+   <TMUX PASTE>
+   ^D
+   base64 -d server.64 | gzip -dc > server
+   chmod +x server
+   ```
+
+2. Prepare the command-line to run server-side in a file:
+   ```console
+   local$ cat command
+   export RUST_LOG=info
+   <PATH TO SERVER>/server
+   ```
+3. redirect your local shell (i.e. socat or nc) STDIN/STDOUT with [reredirect](https://github.com/jerome-pouiller/reredirect).
+   ```console
+   local$ mkfifo in out
+   local$ reredirect -v -i $PWD/in -o $PWD/out $(pidof socat)
+   ```
+
+4. send the command to the remote shell
+   ```console
+   local$ cat command > in
+   ```
+
+5. Read (any) output from command to avoid messing up with protocol
+   ```console
+   local$ cat out
+   ```
+6. Start client
+   ```console
+   local$ cat out | \
+   RUST_LOG=info cargo run --example=client -- --bind-addr 127.0.0.1:1337 | \
+   tee /dev/null > in
+   ```
+
+7. Enjoy !
+
+
 ## Internals
 ### Event loop
 It uses [tokio](https://tokio.rs/) and is fully asynchronous to avoir spawing

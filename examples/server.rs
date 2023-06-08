@@ -5,6 +5,7 @@ use multiplex::{
 };
 
 async fn open_stream(endpoint: proto::Endpoint) -> OpenStreamResult {
+    tracing::debug!("Request opening of {:?}", &endpoint);
     match endpoint {
         proto::Endpoint::UnixSocket { path } => {
             let handle = tokio::net::UnixStream::connect(path).await?;

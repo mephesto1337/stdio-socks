@@ -1,7 +1,16 @@
-use std::sync::Arc;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time,
+};
 
 use clap::Parser;
 
@@ -16,6 +25,7 @@ mod socks;
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
+    /// Bind address to use
     #[arg(short, long)]
     bind_addr: std::net::SocketAddr,
 }
@@ -107,24 +117,41 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&args.bind_addr).await?;
     let stdio = Stdio::new();
 
+    tracing::debug!("Starting multiplexer");
     let (mp, server) = MultiplexerBuilder::<ModeClient, _>::new().build();
     let mp = Arc::new(mp);
+    let server_is_alive = &*Box::leak(Box::new(AtomicBool::new(true)));
 
     tokio::spawn(async move {
+        tracing::debug!("Multiplexer server task started");
         if let Err(e) = server.serve(stdio).await {
             tracing::error!("Server encountered error: {e}");
         }
+        tracing::debug!("Multiplexer server task finished");
+        server_is_alive.store(false, Ordering::Relaxed);
     });
 
-    loop {
-        let (client, addr) = listener.accept().await?;
-        tracing::debug!("New connection from {}", &addr);
+    while server_is_alive.load(Ordering::Relaxed) {
+        let sleep = time::sleep(Duration::from_millis(200));
+        tokio::pin!(sleep);
 
-        let mp = Arc::clone(&mp);
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(mp, client).await {
-                tracing::error!("Error which client {}: {}", addr, e);
+        tokio::select! {
+            r = listener.accept() => {
+                let (client, addr) = r?;
+                tracing::debug!("New connection from {}", &addr);
+
+                let mp = Arc::clone(&mp);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(mp, client).await {
+                        tracing::error!("Error which client {}: {}", addr, e);
+                    }
+                });
             }
-        });
+            _ = &mut sleep => {
+                continue;
+            }
+        }
     }
+
+    Ok(())
 }
